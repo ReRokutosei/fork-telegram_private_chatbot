@@ -65,8 +65,7 @@ v4.0 版本移除了所有不稳定的外部 API 依赖，专注于**极致的�
 2.  **管理员群组**：创建一个 Telegram 群组，并**开启话题功能 (Topics)**。
     * 将机器人拉入群组，并设为**管理员**（给予管理话题权限）。
     * 获取群组 ID（通常以 `-100` 开头）。
-     ``获取 SUPERGROUP_ID 小技巧：在 Telegram 桌面端右键群内任意消息，复制消息链接；
-链接里会有一段 -100xxxxxxxxxx 或 xxxxxxxxxx；若只看到纯数字 xxxxxxxxxx，在前面加上 -100，就是完整的 SUPERGROUP_ID（私密频道/群组同理）。
+     ``获取 SUPERGROUP_ID 小技巧：
 在 Telegram 桌面端右键群内任意消息，复制消息链接；链接里会有一段 -100xxxxxxxxxx 或 xxxxxxxxxx；若只看到纯数字 xxxxxxxxxx，在前面加上 -100，就是完整的 SUPERGROUP_ID（私密频道/群组同理）。``
 
 ### 方法一：GitHub 一键连接部署 (推荐 ★)
@@ -145,7 +144,7 @@ A: 请确保：1. 群组 ID 正确（-100开头）；2. 群组已开启 Topics �
 
 ## 📈 Star History
 
-[![Star History Chart](https://api.star-history.com/svg?repos=jikssha/telegram_private_chatbot&type=Date)](https://star-history.com/#jikssha/telegram_private_chatbot&Date)
+[![Star History Chart](https://api.star-history.com/svg?repos=jikssha/telegram_private_chatbot&type=date&legend=top-left)](https://www.star-history.com/#jikssha/telegram_private_chatbot&type=date&legend=top-left)
 
 ---
 **如果这个项目对你有帮助，请给个 Star ⭐️ 吧！**
