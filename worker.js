@@ -21,7 +21,8 @@ const CONFIG = {
     MAX_CLEANUP_DISPLAY: 20,
     CLEANUP_LOCK_TTL_SECONDS: 1800,     // /cleanup 防并发锁 30 分钟
     MAX_RETRY_ATTEMPTS: 3,
-    THREAD_HEALTH_TTL_MS: 60000
+    THREAD_HEALTH_TTL_MS: 60000,
+    MESSAGE_MAP_TTL_SECONDS: 86400      // 24小时，消息映射的TTL
 };
 
 // 线程健康检查缓存，减少频繁探测请求
@@ -412,6 +413,12 @@ export default {
       return new Response("OK");
     }
 
+    // 处理编辑过的消息
+    if (update.edited_message) {
+      await handleEditedMessage(update.edited_message, normalizedEnv, ctx);
+      return new Response("OK");
+    }
+
     if (update.callback_query) {
       await handleCallbackQuery(update.callback_query, normalizedEnv, ctx);
       return new Response("OK");
@@ -692,13 +699,26 @@ async function forwardToTopic(msg, userId, key, env, ctx) {
         if (desc.includes("not enough rights")) throw new Error("机器人权限不足 (需 Manage Topics)");
 
         // 如果forwardMessage失败，尝试使用copyMessage作为降级方案
-        await tgCall(env, "copyMessage", {
+        const copyResult = await tgCall(env, "copyMessage", {
             chat_id: env.SUPERGROUP_ID,
             from_chat_id: userId,
             message_id: msg.message_id,
             message_thread_id: rec.thread_id
         });
-    }
+
+        // 记录消息映射关系，用于后续编辑同步
+        if (copyResult.ok) {
+          const mapKey = `msg_map:${userId}:${msg.message_id}`;
+          const mapValue = JSON.stringify({
+            targetChatId: env.SUPERGROUP_ID,
+            targetMsgId: copyResult.result.message_id,
+            createdAt: Date.now()
+          });
+          await env.TOPIC_MAP.put(mapKey, mapValue, { 
+            expirationTtl: CONFIG.MESSAGE_MAP_TTL_SECONDS 
+          });
+        }
+      }
 }
 
 async function handleAdminReply(msg, env, ctx) {
@@ -804,7 +824,25 @@ async function handleAdminReply(msg, env, ctx) {
     await handleMediaGroup(msg, env, ctx, { direction: "t2p", targetChat: userId, threadId: undefined });
     return;
   }
-  await tgCall(env, "copyMessage", { chat_id: userId, from_chat_id: env.SUPERGROUP_ID, message_id: msg.message_id });
+  
+  const copyResult = await tgCall(env, "copyMessage", { 
+    chat_id: userId, 
+    from_chat_id: env.SUPERGROUP_ID, 
+    message_id: msg.message_id 
+  });
+  
+  // 记录消息映射关系，用于后续编辑同步
+  if (copyResult.ok) {
+    const mapKey = `msg_map:${env.SUPERGROUP_ID}:${msg.message_id}`;
+    const mapValue = JSON.stringify({
+      targetChatId: userId,
+      targetMsgId: copyResult.result.message_id,
+      createdAt: Date.now()
+    });
+    await env.TOPIC_MAP.put(mapKey, mapValue, { 
+      expirationTtl: CONFIG.MESSAGE_MAP_TTL_SECONDS 
+    });
+  }
 }
 
 // ---------------- 验证模块 (纯本地) ----------------
@@ -1533,4 +1571,104 @@ async function delaySend(env, key, ts) {
 
         await env.TOPIC_MAP.delete(key);
     }
+}
+
+/**
+ * 处理编辑消息
+ * @param {object} msg - 编辑后的消息
+ * @param {object} env - 环境变量
+ */
+async function handleEditedMessage(msg, env) {
+  // 检查是否是群组中的编辑消息
+  if (msg.chat?.id == env.SUPERGROUP_ID) {
+    // 管理员编辑了发送给用户的消息
+    const sourceChatId = msg.chat.id;
+    const sourceMsgId = msg.message_id;
+    
+    // 查找消息映射
+    const mapKey = `msg_map:${sourceChatId}:${sourceMsgId}`;
+    const targetInfo = await safeGetJSON(env, mapKey, null);
+    
+    if (targetInfo) {
+      const { targetChatId, targetMsgId } = targetInfo;
+      
+      try {
+        if (msg.text) {
+          await tgCall(env, "editMessageText", {
+            chat_id: targetChatId,
+            message_id: targetMsgId,
+            text: msg.text,
+            entities: msg.entities,
+            parse_mode: msg.parse_mode
+          });
+        } else if (msg.caption) {
+          await tgCall(env, "editMessageCaption", {
+            chat_id: targetChatId,
+            message_id: targetMsgId,
+            caption: msg.caption,
+            caption_entities: msg.caption_entities,
+            parse_mode: msg.parse_mode
+          });
+        }
+      } catch (error) {
+        Logger.warn('edit_message_forward_failed', {
+          sourceChatId,
+          sourceMsgId,
+          targetChatId,
+          targetMsgId,
+          error: error.message
+        });
+      }
+    }
+  } else {
+    // 用户编辑了私聊中的消息，转发到管理群
+    const userId = msg.chat.id;
+    const sourceMsgId = msg.message_id;
+    
+    // 查找用户话题ID
+    const userKey = `user:${userId}`;
+    const userRec = await safeGetJSON(env, userKey, null);
+    
+    if (!userRec || !userRec.thread_id) {
+      return; // 用户没有话题或未验证
+    }
+    
+    // 查找消息映射
+    const mapKey = `msg_map:${userId}:${sourceMsgId}`;
+    const targetInfo = await safeGetJSON(env, mapKey, null);
+    
+    if (targetInfo) {
+      const { targetChatId, targetMsgId } = targetInfo;
+      
+      try {
+        if (msg.text) {
+          await tgCall(env, "editMessageText", {
+            chat_id: env.SUPERGROUP_ID,
+            message_id: targetMsgId,
+            message_thread_id: userRec.thread_id,
+            text: msg.text,
+            entities: msg.entities,
+            parse_mode: msg.parse_mode
+          });
+        } else if (msg.caption) {
+          await tgCall(env, "editMessageCaption", {
+            chat_id: env.SUPERGROUP_ID,
+            message_id: targetMsgId,
+            message_thread_id: userRec.thread_id,
+            caption: msg.caption,
+            caption_entities: msg.caption_entities,
+            parse_mode: msg.parse_mode
+          });
+        }
+      } catch (error) {
+        Logger.warn('edit_message_forward_failed', {
+          sourceChatId: userId,
+          sourceMsgId,
+          targetChatId,
+          targetMsgId,
+          error: error.message
+        });
+      }
+    }
+  }
 }

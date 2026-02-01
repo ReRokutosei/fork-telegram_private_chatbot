@@ -15,14 +15,19 @@ Deploy a free, enterprise-grade customer service system utilizing Cloudflare's p
 
 ## 📑 Table of Contents
 
-* [✨ Key Features](#-key-features)
-* [🛠️ Administrator Commands](#-administrator-commands)
-* [🚀 Deployment Tutorial](#-deployment-tutorial)
-    * [Method 1: One-Click Deploy via GitHub (Recommended)](#method-1-one-click-deploy-via-github-recommended-)
-    * [Method 2: Manual Deployment](#method-2-manual-deployment-simple--direct)
-    * [Final Step: Activate Webhook](#final-step-activate-webhook-crucial)
-* [❓ FAQ](#-faq)
-* [📈 Star History](#-star-history)
+- [🛡️ TeleGuard (v4.0)](#️-teleguard-v40)
+  - [📑 Table of Contents](#-table-of-contents)
+  - [✨ Key Features](#-key-features)
+  - [| **Message Edit Synchronization** | Supports users and administrators to edit messages within 24 hours. After editing, the changes will be automatically synchronized to the other side.|](#-message-edit-synchronization--supports-users-and-administrators-to-edit-messages-within-24-hours-after-editing-the-changes-will-be-automatically-synchronized-to-the-other-side)
+  - [🛠️ Administrator Commands](#️-administrator-commands)
+  - [🚀 Deployment Tutorial](#-deployment-tutorial)
+    - [Prerequisites](#prerequisites)
+    - [Method 1: One-Click Deploy via GitHub (Recommended ★)](#method-1-one-click-deploy-via-github-recommended-)
+    - [Method 2: Manual Deployment (Simple \& Direct)](#method-2-manual-deployment-simple--direct)
+    - [Final Step: Activate Webhook (Crucial)](#final-step-activate-webhook-crucial)
+  - [❓ FAQ](#-faq)
+  - [🔒 Security Note](#-security-note)
+  - [📈 Star History](#-star-history)
 
 ---
 
@@ -39,7 +44,7 @@ Version 4.0 removes all unstable external API dependencies, focusing on **extrem
 | **🔒 Permission Control** | Powerful command set: Supports **Ban (/ban)**, **Unban (/unban)**, **Close Ticket (/close)**, and **Trust (/trust)** operations. |
 | **☁️ Serverless** | Runs entirely on Cloudflare Workers. **Zero cost**, server-free, maintenance-free, and handles high concurrency. |
 | **📸 Multimedia Support** | Perfectly supports two-way forwarding of text, images, videos, files, and other message formats without losing any details. |
-
+| **Message Edit Synchronization** | Supports users and administrators to edit messages within 24 hours. After editing, the changes will be automatically synchronized to the other side.|
 ---
 
 ## 🛠️ Administrator Commands
