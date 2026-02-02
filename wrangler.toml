@@ -2,15 +2,25 @@ name = 'terminal-aide-0017'
 main = "worker.js"
 compatibility_date = "2024-11-30"
 
+# ============================================================================
+# Durable Object 配置
+# ============================================================================
+
+# Durable Object 类迁移配置
+# 必须定义迁移来注册 DO 类，否则 CF 面板无法识别
+[[migrations]]
+tag = "v1"
+new_sqlite_classes = ["RateLimitDO"]
+
+# ============================================================================
+# 环境配置
+# ============================================================================
+
 # 注意：KV 命名空间 ID 每个用户都不一样，
 # 所以不能写死在这里。用户需要在 Cloudflare 后台手动绑定。
 
-# Durable Object 绑定配置
-# 用户需要：
-# 1. 在 Cloudflare 后台创建 Durable Object 绑定，指向 RateLimitDO
-# 2. 设置环境变量 RATE_LIMIT_DO 指向 DO 实例
 [env.production]
-# 示例配置（需要用户手动设置）
+# Durable Object 绑定配置（在 CF 面板中手动添加）
 # [[durable_objects.bindings]]
 # name = "RATE_LIMIT_DO"
 # class_name = "RateLimitDO"
