@@ -218,6 +218,38 @@ function isTestMessageInvalid(description) {
            desc.includes("bad request: message text is empty");
 }
 
+/**
+ * 发送用户信息卡片
+ * 当新用户或被重建的用户接入对话时调用
+ */
+async function sendWelcomeCard(env, threadId, userId, userFrom) {
+    if (!userFrom) return;
+
+    const firstName = (userFrom.first_name || "").trim();
+    const lastName = (userFrom.last_name || "").trim();
+    const userNameStr = userFrom.username ? `@${userFrom.username}` : "未设置用户名";
+    const fullName = (firstName + (lastName ? " " + lastName : "")).trim() || "匿名用户";
+
+    const cardText = `👤 <b>新用户接入</b>\n` +
+                    `ID: <code>${userId}</code>\n` +
+                    `名字: <a href="tg://user?id=${userId}">${fullName}</a>\n` +
+                    `用户名: ${userNameStr}\n` +
+                    `#id${userId}`;
+
+    try {
+        await tgCall(env, "sendMessage", {
+            chat_id: env.SUPERGROUP_ID,
+            message_thread_id: threadId,
+            text: cardText,
+            parse_mode: "HTML"
+        });
+
+        Logger.info('welcome_card_sent', { userId, threadId });
+    } catch (e) {
+        Logger.warn('welcome_card_send_failed', { userId, threadId, error: e.message });
+    }
+}
+
 // ============================================================================
 // 话题管理
 // ============================================================================
@@ -319,7 +351,7 @@ async function probeForumThread(env, expectedThreadId, { userId, reason, doubleC
 /**
  * 重置用户验证并要求重新验证
  */
-async function resetUserVerificationAndRequireReverify(env, { userId, userKey, oldThreadId, pendingMsgId, reason }) {
+async function resetUserVerificationAndRequireReverify(env, { userId, userKey, oldThreadId, pendingMsgId, reason, userFrom = null }) {
     await env.TOPIC_MAP.delete(`verified:${userId}`);
     await env.TOPIC_MAP.put(`needs_verify:${userId}`, "1", { expirationTtl: CONFIG.NEEDS_REVERIFY_TTL_SECONDS });
     await env.TOPIC_MAP.delete(`retry:${userId}`);
@@ -651,6 +683,9 @@ async function forwardToTopic(msg, env, ctx) {
         if (!rec || !rec.thread_id) {
             throw new Error("创建话题失败");
         }
+
+        // 新用户接入：发送用户信息卡片
+        await sendWelcomeCard(env, rec.thread_id, userId, msg.from);
     }
 
     // 补建 thread->user 映射（兼容旧数据）
@@ -682,7 +717,8 @@ async function forwardToTopic(msg, env, ctx) {
                         userKey: key,
                         oldThreadId: rec.thread_id,
                         pendingMsgId: msg.message_id,
-                        reason: `health_check:${probe.status}`
+                        reason: `health_check:${probe.status}`,
+                        userFrom: msg.from
                     });
                     return;
                 } else if (probe.status === "probe_invalid") {
@@ -750,7 +786,8 @@ async function forwardToTopic(msg, env, ctx) {
             userKey: key,
             oldThreadId: rec.thread_id,
             pendingMsgId: msg.message_id,
-            reason: "forward_redirected_to_general"
+            reason: "forward_redirected_to_general",
+            userFrom: msg.from
         });
         return;
     }
@@ -781,7 +818,8 @@ async function forwardToTopic(msg, env, ctx) {
                 userKey: key,
                 oldThreadId: rec.thread_id,
                 pendingMsgId: msg.message_id,
-                reason: `forward_missing_thread_id:${probe.status}`
+                reason: `forward_missing_thread_id:${probe.status}`,
+                userFrom: msg.from
             });
             return;
         }
@@ -801,7 +839,8 @@ async function forwardToTopic(msg, env, ctx) {
                 userKey: key,
                 oldThreadId: rec.thread_id,
                 pendingMsgId: msg.message_id,
-                reason: "forward_failed_topic_missing"
+                reason: "forward_failed_topic_missing",
+                userFrom: msg.from
             });
             return;
         }
