@@ -750,7 +750,8 @@ function shuffleArray(arr) {
 
 /**
  * 速率限制检查
- * 优先使用 Durable Object 保证原子性
+ * 使用 RPC 方式调用 Durable Object
+ * 优先使用 Durable Object 保证原子性，不可用时降级到 KV
  */
 async function checkRateLimit(userId, env, action = 'message', limit = 20, window = 60) {
     if (!env.RATE_LIMIT_DO) {
@@ -768,25 +769,21 @@ async function checkRateLimit(userId, env, action = 'message', limit = 20, windo
     }
 
     try {
-        const stub = env.RATE_LIMIT_DO.get(String(userId));
-        const response = await stub.fetch(new Request('http://do/check', {
-            method: 'POST',
-            body: JSON.stringify({
-                key: `${action}:${userId}`,
-                limit,
-                window
-            })
-        }));
-
-        if (!response.ok) {
-            Logger.warn('rate_limit_do_error', { userId, action, status: response.status });
-            return { allowed: true, remaining: limit };
-        }
-
-        const result = await response.json();
+        const stub = env.RATE_LIMIT_DO.getByName(String(userId));
+        const result = await stub.check(`${action}:${userId}`, limit, window);
         return { allowed: result.allowed, remaining: result.remaining };
     } catch (e) {
-        Logger.error('rate_limit_do_call_failed', e, { userId, action });
+        // 检查是否为可重试的错误
+        if (e.retryable) {
+            Logger.warn('rate_limit_do_retryable_error', { userId, action, error: e.message });
+        } else if (e.overloaded) {
+            Logger.warn('rate_limit_do_overloaded', { userId, action });
+            // DO 过载，降级处理
+        } else {
+            Logger.error('rate_limit_do_call_failed', e, { userId, action });
+        }
+        
+        // 发生错误时允许通过
         return { allowed: true, remaining: limit };
     }
 }
