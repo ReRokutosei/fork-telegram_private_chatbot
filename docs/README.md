@@ -1,17 +1,42 @@
-# Telegram 私聊与超级群组话题双向转发机器人
+# Telegram 私聊与群组话题双向转发机器人
 
 本项目是一个基于 **Cloudflare Workers** 的 Telegram 机器人，实现 **用户私聊消息** 与 **群组论坛话题（Topics）** 之间的一对一双向转发。
 
-该机器人适用于客服、工单、咨询、匿名反馈等需要“私聊入口 + 群内集中处理”的场景。
+---
+
+## 目录
+
+- [Telegram 私聊与群组话题双向转发机器人](#telegram-私聊与群组话题双向转发机器人)
+  - [目录](#目录)
+  - [技术概览](#技术概览)
+  - [功能特性](#功能特性)
+    - [消息与话题管理](#消息与话题管理)
+    - [用户与权限控制](#用户与权限控制)
+    - [管理功能](#管理功能)
+    - [安全与性能](#安全与性能)
+  - [部署教程](#部署教程)
+    - [步骤 1. Bot Token](#步骤-1-bot-token)
+    - [步骤 2. 管理员群组](#步骤-2-管理员群组)
+    - [步骤 3：Fork 仓库](#步骤-3fork-仓库)
+    - [步骤 4：创建 Worker 应用](#步骤-4创建-worker-应用)
+    - [步骤 5：连接 GitHub](#步骤-5连接-github)
+    - [步骤 6：配置部署参数](#步骤-6配置部署参数)
+    - [步骤 7：绑定 KV 与环境变量](#步骤-7绑定-kv-与环境变量)
+    - [步骤 8：激活 Webhook](#步骤-8激活-webhook)
+    - [步骤 9：（可选）配置 Durable Object](#步骤-9可选配置-durable-object)
+  - [管理员指令说明](#管理员指令说明)
+  - [常见问题（FAQ）](#常见问题faq)
+  - [安全说明](#安全说明)
+
 
 ---
 
 ## 技术概览
 
 * **运行环境**：Cloudflare Workers
-* **语言**：JavaScript（Worker Runtime，非 Node.js）
+* **语言**：JavaScript
 * **存储**：Cloudflare KV
-* **可选组件**：Durable Object（用于强一致性限流）
+* **可选组件**：Durable Object
 * **通信方式**：Telegram Bot Webhook
 
 ---
@@ -20,8 +45,9 @@
 
 ### 消息与话题管理
 
-* 私聊 ↔ 超级群组话题双向转发
-* 每个用户对应一个独立论坛话题
+* 私聊 ↔ 群组话题双向转发
+* 每个用户对应一个独立话题
+* 自动重建误删话题
 * 支持文本消息与消息编辑同步
 * 支持图片、视频、音频、文档、GIF
 * 支持媒体组（Media Group）聚合转发
@@ -49,25 +75,21 @@
 
 ---
 
-## 🚀 部署教程
+## 部署教程
 
-### 前置准备
+### 步骤 1. Bot Token
 
-#### 1. Telegram Bot
+在 Telegram 搜索 [@BotFather](https://t.me/BotFather) 并使用它创建一个 Telegram 机器人，获取 **Bot Token**。
+  - 与它对话，输入 `/newbot` 开始创建机器人
+  - 按照说明设置机器人昵称和ID
+  - 完成之后，它会返回一个 Token ,点击即可复制
 
-1. 在TG搜索并使用 [@BotFather](https://t.me/BotFather) 创建一个 Telegram 机器人，获取 **Bot Token**。
-2. **重要设置**：
-   在 BotFather 中关闭 **Group Privacy**：
+### 步骤 2. 管理员群组
 
-   ```
-   /mybots → Bot Settings → Group Privacy → Turn off
-   ```
-
-#### 2. 管理员群组
-
-1. 创建一个 Telegram 群组
+1. 在 Telegram 创建一个群组
+   - 群组类型可为`私人`
 2. 在群组设置中启用 **话题功能（Topics）**。
-3. 将机器人加入群组，并设置为 **管理员**，至少授予以下权限：
+3. 将机器人加入群组，并设置为 **管理员**，且至少授予以下权限：
 
    * 管理话题（Manage Topics）
    * 删除消息
@@ -75,7 +97,7 @@
 
 ```
 获取 SUPERGROUP_ID 的两种方法：
-①使用第三方客户端，比如 Windows 使用 AyuGram ，安卓使用 Nagram X，可直接看到群组 ID
+①使用第三方客户端，比如 Windows 使用 AyuGram ，安卓使用 Nagram X，可直接复制群组 ID
 如果只看到纯数字 xxxxxxxxxx，请在前面加上 -100
 
 ②在 Telegram 官方桌面端右键群内任意一条消息 → 复制消息链接。
@@ -86,18 +108,14 @@
 
 ---
 
-### 方法一：GitHub 一键连接部署（推荐）
-
-该方式通过 Cloudflare 与 GitHub 集成实现自动部署。
-
-#### 步骤 1：Fork 仓库
+### 步骤 3：Fork 仓库
 
 * 将本项目 Fork 到你的 GitHub 账户。
 * 修改[wrangler.tomlname](wrangler.toml)
-  * 将`name = 'terminal-aide-0017'`改为任意自定义项目名称，后续需要用到
+  * 将`name = 'terminal-aide-0017'`改为任意自定义项目名称，**后续需要用到**
   * 注意名称只能包含小写字母（a-z）、数字（0-9）和连字符
 
-#### 步骤 2：创建 Worker 应用
+### 步骤 4：创建 Worker 应用
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)。
 2. 进入 **Workers 和 Pages**。
@@ -105,7 +123,7 @@
 
 ![](./20260131150240.webp)
 
-#### 步骤 3：连接 GitHub
+### 步骤 5：连接 GitHub
 
 1. 选择 **Connect to Git** 标签页。
 2. 授权 Cloudflare 访问你的 GitHub。
@@ -113,7 +131,7 @@
 
 ![](./20260131150305.webp)
 
-#### 步骤 4：配置部署参数
+### 步骤 6：配置部署参数
 
 * **项目名称**：`terminal-aide-0017`
   * 或任意名称，注意要和步骤一的 `name` 对应，否则会部署失败
@@ -125,7 +143,7 @@
 
 ![](./20260131151125.webp)
 
-#### 步骤 5：绑定 KV 与环境变量
+### 步骤 7：绑定 KV 与环境变量
 
 部署完成后：
 
@@ -166,25 +184,7 @@
 
 ---
 
-#### 步骤 6：配置 Durable Object（RATE_LIMIT_DO）
-
-本步骤为启用基于 Durable Object 的强一致性限流机制。
-未配置 Durable Object 时，机器人仍可正常工作，但限流能力会退化。
-
-- 在 耐用对象 中添加绑定：
-
-![](./20260202024414.webp)
-
-![](./20260202024546.webp)
-
-  - 变量名称：RATE_LIMIT_DO
-  - 类名（Class Name）：RateLimitDO
-  - 脚本（Script）：填写当前 Worker 名称
-  - **（需与 wrangler.toml 中的 name 一致）**
-
----
-
-#### 步骤 7：激活 Webhook
+### 步骤 8：激活 Webhook
 
 这一步需要手动设置 Telegram Webhook。
 
@@ -221,13 +221,34 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 
 ---
 
+### 步骤 9：（可选）配置 Durable Object
+
+本步骤为启用基于 Durable Object 的强一致性限流机制
+
+未配置 Durable Object 时，机器人仍可正常工作，但限流能力会退化
+
+注意：本步骤**需要先成功部署一次**，面板才会导出我们需要的耐用对象
+
+- 在 耐用对象 中添加绑定：
+  - 只需要填写变量名称为 `RATE_LIMIT_DO` 即可
+  - 耐用对象是自动导出的 `{ProjectName_RateLimitDO}` ，下拉选中即可
+  - 如果没发现有可选的耐用对象，请**至少部署成功一次**再重新绑定
+
+![](./20260202024414.webp)
+
+![](./20260202024546.webp)
+
+![](./20260202200351.webp)
+
+---
+
 ## 管理员指令说明
 
 > 所有管理指令 **仅在群组的话题内有效**。
 > 私聊中发送的管理指令会被忽略，不会产生任何反馈。
 
 |    指令    | 作用                               |
-| :--------: | ---------------------------------- |
+| :--------: | :-------------------------------- |
 |  `/info`   | 显示当前用户 ID、话题 ID、验证状态 |
 |  `/close`  | 关闭对话，拒绝该用户的新消息       |
 |  `/open`   | 重新开启已关闭的对话               |
@@ -241,14 +262,19 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 
 ## 常见问题（FAQ）
 
-**Q：机器人无法创建话题？**
-A：请确认：
+**Q1：机器人无法创建话题？**
+<details><summary><strong>点击查看</strong></summary>
+A1：请确认：
 
 1. 已启用 Topics
 2. 机器人具有管理话题权限
+</details>
 
-**Q：验证通过但消息不转发？**
-A：
+***
+
+**Q2：验证通过但消息不转发？**
+<details><summary><strong>点击查看</strong></summary>
+A2：
 
 1. 删除现有 webhook：
 
@@ -259,31 +285,22 @@ https://api.telegram.org/bot<TOKEN>/deleteWebhook?drop_pending_updates=true
 2. 重新设置 webhook
 3. 确认变量名和群组 ID 无误
 
-**Q：机器人没反应**
+</details>
 
-A: 
+***
 
-一般是 Cloudflare 的问题，当你部署完成后，改动了其他设置或者在 GitHub 推送更新，之前绑定的**KV命名空间**会莫名失效/消失/自动解绑，需要手动再绑定
+**Q3：机器人无任何反应**
+<details><summary><strong>点击查看</strong></summary>
+A3: 
 
----
-
-## 项目结构
-
-```
-telegram_private_chatbot/
-├── worker.js
-├── rate-limit-do.js
-├── wrangler.toml
-├── package.json
-├── README.md
-└── PATCHES.md
-```
+一般是 Cloudflare 的问题，当你部署完成后，改动了其他设置或者在 GitHub 推送更新，之前绑定的**KV命名空间**会莫名 失效/消失/自动解绑，请检查并手动重新绑定
+</details>
 
 ---
 
 ## 安全说明
-
-* 不要在代码中硬编码 Bot Token
-* KV 数据为明文存储，请勿保存敏感信息
-* 谨慎使用 `/trust` 与 `/ban`
-* 定期执行 `/cleanup` 清理无效数据
+> [!CAUTION]
+> * 不要在代码中硬编码 Bot Token
+> * KV 数据为明文存储，请勿保存敏感信息
+> * 谨慎使用 `/trust` 与 `/ban`
+> * 定期执行 `/cleanup` 清理无效数据
