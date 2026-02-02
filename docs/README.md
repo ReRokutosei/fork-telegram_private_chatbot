@@ -1,12 +1,21 @@
-# Telegram 私聊与群组话题双向转发机器人
+# Telegram 双向转发机器人
 
-本项目是一个基于 **Cloudflare Workers** 的 Telegram 机器人，实现 **用户私聊消息** 与 **群组论坛话题（Topics）** 之间的一对一双向转发。
+> [!TIP]
+> （2026.02.03）相对于 [原项目（96ffd6b）](https://github.com/jikssha/telegram_private_chatbot/commit/96ffd6b492694ce68ce0f52d76630b5516425f93)，本 fork **主要变更**：
+>
+> - [由转发消息重构为**中介模式**，支持 24 小时内**双向消息编辑同步**](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/54d5fd13e2f9d4c15066fb75250f452829c2b873)
+> - [限流逻辑迁移至 Durable Object，并引入 SQLite + 内存缓存](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/d2181a0f9f4ad4cb910b667144074e02d401d7b9)
+> - [优化 KV 操作（批量、缓存、重试等）](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/ff0736c2798af8a16cd7f6e04f49b559cc696cbb)
+> - [新用户或被重建话题的用户接入时，机器人发送**用户资料卡片**](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/7d03ae36d377396ebc402eb43d741592ecdfb994)
+> - 完善文档步骤说明，**添加截图示意**
+
+本项目是一个基于 **Cloudflare Workers** 的 Telegram 机器人，实现 **用户私聊消息** 与 **群组话题（Topics）** 之间的一对一双向转发。
 
 ---
 
 ## 目录
 
-- [Telegram 私聊与群组话题双向转发机器人](#telegram-私聊与群组话题双向转发机器人)
+- [Telegram 双向转发机器人](#telegram-双向转发机器人)
   - [目录](#目录)
   - [技术概览](#技术概览)
   - [功能特性](#功能特性)
@@ -15,8 +24,8 @@
     - [管理功能](#管理功能)
     - [安全与性能](#安全与性能)
   - [部署教程](#部署教程)
-    - [步骤 1. Bot Token](#步骤-1-bot-token)
-    - [步骤 2. 管理员群组](#步骤-2-管理员群组)
+    - [步骤 1：Bot Token](#步骤-1bot-token)
+    - [步骤 2：管理员群组](#步骤-2管理员群组)
     - [步骤 3：Fork 仓库](#步骤-3fork-仓库)
     - [步骤 4：创建 Worker 应用](#步骤-4创建-worker-应用)
     - [步骤 5：连接 GitHub](#步骤-5连接-github)
@@ -47,7 +56,7 @@
 
 * 私聊 ↔ 群组话题双向转发
 * 每个用户对应一个独立话题
-* 自动重建误删话题
+* **自动重建误删话题**
 * 支持文本消息与消息编辑同步
 * 支持图片、视频、音频、文档、GIF
 * 支持媒体组（Media Group）聚合转发
@@ -77,14 +86,14 @@
 
 ## 部署教程
 
-### 步骤 1. Bot Token
+### 步骤 1：Bot Token
 
 在 Telegram 搜索 [@BotFather](https://t.me/BotFather) 并使用它创建一个 Telegram 机器人，获取 **Bot Token**。
   - 与它对话，输入 `/newbot` 开始创建机器人
   - 按照说明设置机器人昵称和ID
   - 完成之后，它会返回一个 Token ,点击即可复制
 
-### 步骤 2. 管理员群组
+### 步骤 2：管理员群组
 
 1. 在 Telegram 创建一个群组
    - 群组类型可为`私人`
@@ -293,7 +302,12 @@ https://api.telegram.org/bot<TOKEN>/deleteWebhook?drop_pending_updates=true
 <details><summary><strong>点击查看</strong></summary>
 A3: 
 
-一般是 Cloudflare 的问题，当你部署完成后，改动了其他设置或者在 GitHub 推送更新，之前绑定的**KV命名空间**会莫名 失效/消失/自动解绑，请检查并手动重新绑定
+一般是 Cloudflare 的问题，当你部署完成后，改动了其他设置或者在 GitHub 推送更新，之前绑定的**KV 命名空间**和**DO 耐用对象**会莫名 失效/消失/自动解绑，请检查并手动重新绑定
+
+注：可以在 Cloudflare Woker面板设置中添加排除监听路径，排除文档变更的 commit 触发重新构建 
+
+<img src="./20260203022734.webp" width="1500" />
+
 </details>
 
 ---
