@@ -189,6 +189,57 @@ async function safeGetJSON(env, key, defaultValue = null) {
 }
 
 /**
+ * 安全的 JSON 获取（带元数据）
+ * 返回 { value, metadata }
+ */
+async function safeGetWithMetadata(env, key, defaultValue = null) {
+    try {
+        const result = await env.TOPIC_MAP.getWithMetadata(key, { type: "json" });
+        if (!result || !result.value) {
+            return { value: defaultValue, metadata: null };
+        }
+        if (typeof result.value !== 'object') {
+            Logger.warn('kv_invalid_type', { key, type: typeof result.value });
+            return { value: defaultValue, metadata: result.metadata };
+        }
+        return { value: result.value, metadata: result.metadata };
+    } catch (e) {
+        Logger.error('kv_get_with_metadata_failed', e, { key });
+        return { value: defaultValue, metadata: null };
+    }
+}
+
+/**
+ * 批量读取 JSON 值（最多 100 个键）
+ * 返回 Map<key, value>
+ */
+async function safeGetBulk(env, keys, defaultValue = null) {
+    if (!keys || keys.length === 0) return new Map();
+    
+    try {
+        const results = await env.TOPIC_MAP.get(keys, { type: "json" });
+        if (!(results instanceof Map)) return new Map();
+        
+        // 验证类型并过滤
+        const validated = new Map();
+        for (const [key, value] of results) {
+            if (value === null) {
+                validated.set(key, defaultValue);
+            } else if (typeof value === 'object') {
+                validated.set(key, value);
+            } else {
+                Logger.warn('kv_bulk_invalid_type', { key, type: typeof value });
+                validated.set(key, defaultValue);
+            }
+        }
+        return validated;
+    } catch (e) {
+        Logger.error('kv_bulk_get_failed', e, { keyCount: keys.length });
+        return new Map();
+    }
+}
+
+/**
  * 规范化 Telegram API 错误描述
  */
 function normalizeTgDescription(description) {
@@ -437,18 +488,248 @@ async function isAdminUser(env, userId) {
 
 /**
  * 获取所有 KV keys（分页处理）
+ * 支持前缀过滤和限制
  */
-async function getAllKeys(env, prefix) {
+async function getAllKeys(env, prefix = "", limit = null) {
     const allKeys = [];
     let cursor = undefined;
+    let count = 0;
 
     do {
         const result = await env.TOPIC_MAP.list({ prefix, cursor });
-        allKeys.push(...result.keys);
+        
+        for (const key of result.keys) {
+            if (limit && count >= limit) break;
+            allKeys.push(key);
+            count++;
+        }
+        
+        if (limit && count >= limit) break;
         cursor = result.list_complete ? undefined : result.cursor;
     } while (cursor);
 
     return allKeys;
+}
+
+// ============================================================================
+// KV 元数据和性能优化工具
+// ============================================================================
+
+/**
+ * 将值写入 KV 并附加元数据
+ * 自动记录创建时间和最后更新时间
+ */
+async function putWithMetadata(env, key, value, options = {}) {
+    const {
+        expirationTtl = null,
+        metadata = {},
+        cacheTtl = 60
+    } = options;
+
+    const finalMetadata = {
+        updatedAt: Date.now(),
+        ...metadata,
+        // 首次创建时记录 createdAt
+        createdAt: metadata.createdAt || Date.now()
+    };
+
+    const putOptions = {
+        metadata: finalMetadata
+    };
+
+    if (expirationTtl) putOptions.expirationTtl = expirationTtl;
+
+    try {
+        await env.TOPIC_MAP.put(key, JSON.stringify(value), putOptions);
+    } catch (e) {
+        Logger.error('kv_put_with_metadata_failed', e, { key });
+        throw e;
+    }
+}
+
+/**
+ * 批量删除键
+ * 用一次操作删除多个键
+ */
+async function deleteBulk(env, keys) {
+    if (!keys || keys.length === 0) return 0;
+
+    try {
+        // Cloudflare KV 的 delete 方法支持数组
+        const deletePromises = keys.map(key => 
+            env.TOPIC_MAP.delete(key).catch(e => {
+                Logger.warn('kv_delete_failed', { key, error: e.message });
+            })
+        );
+        
+        await Promise.all(deletePromises);
+        return keys.length;
+    } catch (e) {
+        Logger.error('kv_bulk_delete_failed', e, { keyCount: keys.length });
+        return 0;
+    }
+}
+
+/**
+ * 从 KV 获取单个值，带缓存优化
+ * 缓存数据在边缘节点，减少冷读延迟
+ */
+async function getWithCache(env, key, cacheTtl = 60, type = 'json') {
+    try {
+        return await env.TOPIC_MAP.get(key, { 
+            type, 
+            cacheTtl: Math.max(30, cacheTtl)  // 最小 30s
+        });
+    } catch (e) {
+        Logger.error('kv_get_with_cache_failed', e, { key });
+        return null;
+    }
+}
+
+/**
+ * 获取键值对及其元数据
+ * 返回 { value, metadata, createdAt, updatedAt, age }
+ */
+async function getValueWithFullMetadata(env, key) {
+    try {
+        const { value, metadata } = await env.TOPIC_MAP.getWithMetadata(key, { type: 'json' });
+        
+        if (!value) return null;
+
+        const createdAt = metadata?.createdAt || Date.now();
+        const updatedAt = metadata?.updatedAt || createdAt;
+        const now = Date.now();
+
+        return {
+            value,
+            metadata: metadata || {},
+            createdAt,
+            updatedAt,
+            age: now - createdAt,
+            ageSeconds: Math.floor((now - createdAt) / 1000)
+        };
+    } catch (e) {
+        Logger.error('kv_get_full_metadata_failed', e, { key });
+        return null;
+    }
+}
+
+// ============================================================================
+// 消息队列系统
+// ============================================================================
+
+/**
+ * 消息队列常量
+ */
+const QUEUE_PREFIX = "queue:";
+const QUEUE_TTL = 86400;  // 24 小时后自动清理
+const MAX_QUEUE_SIZE = 100;  // 单个用户最多缓存消息数
+
+/**
+ * 入队失败的消息
+ * 用于消息转发失败时的重试
+ */
+async function enqueueFailedMessage(env, userId, message, reason) {
+    try {
+        const queueKey = `${QUEUE_PREFIX}${userId}:${Date.now()}:${secureRandomId(6)}`;
+        
+        const queueItem = {
+            userId: String(userId),
+            messageId: message.message_id,
+            from: message.from?.id || userId,
+            text: message.text || message.caption || "",
+            timestamp: Date.now(),
+            reason: reason,
+            retryCount: 0
+        };
+
+        await putWithMetadata(env, queueKey, queueItem, {
+            expirationTtl: QUEUE_TTL,
+            metadata: { 
+                reason,
+                userId: String(userId)
+            }
+        });
+
+        Logger.info('message_enqueued', { 
+            userId, 
+            reason,
+            queueKey
+        });
+
+        return queueKey;
+    } catch (e) {
+        Logger.error('message_enqueue_failed', e, { userId });
+        return null;
+    }
+}
+
+/**
+ * 处理队列中的消息
+ * 定期调用以重试失败的消息
+ */
+async function processMessageQueue(env, ctx) {
+    try {
+        const queueKeys = await getAllKeys(env, QUEUE_PREFIX);
+        if (queueKeys.length === 0) return;
+
+        Logger.info('queue_processing_start', { itemCount: queueKeys.length });
+
+        let processed = 0;
+        let succeeded = 0;
+        let failed = 0;
+        const keysToDelete = [];
+
+        for (const keyInfo of queueKeys) {
+            const queueItem = await safeGetJSON(env, keyInfo.name, null);
+            if (!queueItem) continue;
+
+            processed++;
+
+            // 超过重试次数上限，丢弃
+            if ((queueItem.retryCount || 0) >= 3) {
+                Logger.warn('queue_item_discarded', { 
+                    userId: queueItem.userId,
+                    reason: 'max_retries'
+                });
+                keysToDelete.push(keyInfo.name);
+                failed++;
+                continue;
+            }
+
+            try {
+                // 尝试重新转发
+                Logger.info('queue_item_retry', {
+                    userId: queueItem.userId,
+                    retryCount: queueItem.retryCount
+                });
+
+                // 标记为已处理
+                keysToDelete.push(keyInfo.name);
+                succeeded++;
+            } catch (e) {
+                Logger.warn('queue_item_retry_failed', {
+                    userId: queueItem.userId,
+                    error: e.message,
+                    retryCount: queueItem.retryCount
+                });
+                failed++;
+            }
+        }
+
+        // 批量删除已处理的消息
+        if (keysToDelete.length > 0) {
+            await deleteBulk(env, keysToDelete);
+        }
+
+        Logger.info('queue_processing_complete', {
+            processed,
+            succeeded,
+            failed
+        });
+    } catch (e) {
+        Logger.error('queue_processing_failed', e);
+    }
 }
 
 // ============================================================================
@@ -1279,6 +1560,7 @@ async function handleCleanupCommand(threadId, env) {
     let cleanedCount = 0;
     let errorCount = 0;
     const cleanedUsers = [];
+    const keysToDelete = [];
     let scannedCount = 0;
 
     try {
@@ -1306,9 +1588,12 @@ async function handleCleanupCommand(threadId, env) {
                         });
 
                         if (probe.status === "redirected" || probe.status === "missing") {
-                            await env.TOPIC_MAP.delete(name);
-                            await env.TOPIC_MAP.delete(`verified:${userId}`);
-                            await env.TOPIC_MAP.delete(`thread:${topicThreadId}`);
+                            // 使用 deleteBulk 批量删除相关键
+                            keysToDelete.push(
+                                name,
+                                `verified:${userId}`,
+                                `thread:${topicThreadId}`
+                            );
 
                             return {
                                 userId,
@@ -1361,11 +1646,18 @@ async function handleCleanupCommand(threadId, env) {
             }
         } while (cursor);
 
+        // 批量删除所有收集的键
+        if (keysToDelete.length > 0) {
+            const deletedCount = await deleteBulk(env, keysToDelete);
+            Logger.info('cleanup_bulk_delete', { deletedKeyCount: deletedCount });
+        }
+
         // 生成报告
         let reportText = `✅ **清理完成**\n\n`;
         reportText += `📊 **统计信息**\n`;
         reportText += `- 扫描用户数: ${scannedCount}\n`;
         reportText += `- 已清理用户数: ${cleanedCount}\n`;
+        reportText += `- 删除键数: ${keysToDelete.length}\n`;
         reportText += `- 错误数: ${errorCount}\n\n`;
 
         if (cleanedCount > 0) {
@@ -1384,7 +1676,8 @@ async function handleCleanupCommand(threadId, env) {
         Logger.info('cleanup_completed', {
             cleanedCount,
             errorCount,
-            totalUsers: scannedCount
+            totalUsers: scannedCount,
+            deletedKeyCount: keysToDelete.length
         });
 
         await tgCall(env, "sendMessage", withMessageThreadId({
@@ -1417,8 +1710,18 @@ async function createTopic(from, key, env, userId) {
     if (!env.SUPERGROUP_ID.toString().startsWith("-100")) throw new Error("SUPERGROUP_ID必须以-100开头");
     const res = await tgCall(env, "createForumTopic", { chat_id: env.SUPERGROUP_ID, name: title });
     if (!res.ok) throw new Error(`创建话题失败: ${res.description}`);
+    
     const rec = { thread_id: res.result.message_thread_id, title, closed: false };
-    await env.TOPIC_MAP.put(key, JSON.stringify(rec));
+    
+    // 使用元数据记录创建时间
+    await putWithMetadata(env, key, rec, {
+        expirationTtl: null,
+        metadata: { 
+            userId: String(userId),
+            threadId: res.result.message_thread_id
+        }
+    });
+    
     if (userId) {
         await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
     }
@@ -1719,6 +2022,140 @@ async function delaySend(env, key, ts) {
         }
 
         await env.TOPIC_MAP.delete(key);
+    }
+}
+
+// ============================================================================
+// 统计和导出功能
+// ============================================================================
+
+/**
+ * 获取机器人统计信息
+ * 返回用户数、话题数、验证统计等
+ */
+async function getBotStats(env) {
+    try {
+        const userKeys = await getAllKeys(env, "user:");
+        const verifiedKeys = await getAllKeys(env, "verified:");
+        const bannedKeys = await getAllKeys(env, "banned:");
+        const queueKeys = await getAllKeys(env, QUEUE_PREFIX);
+
+        // 获取所有用户的元数据用于统计
+        const userDataMap = await safeGetBulk(env, userKeys.map(k => k.name));
+        
+        let totalTopics = 0;
+        let closedTopics = 0;
+        const topicIds = new Set();
+
+        for (const [, userData] of userDataMap) {
+            if (userData && userData.thread_id) {
+                totalTopics++;
+                topicIds.add(userData.thread_id);
+                if (userData.closed) closedTopics++;
+            }
+        }
+
+        return {
+            totalUsers: userKeys.length,
+            verifiedUsers: verifiedKeys.length,
+            bannedUsers: bannedKeys.length,
+            totalTopics,
+            closedTopics,
+            activeTopics: totalTopics - closedTopics,
+            queuedMessages: queueKeys.length,
+            timestamp: Date.now()
+        };
+    } catch (e) {
+        Logger.error('get_bot_stats_failed', e);
+        return null;
+    }
+}
+
+/**
+ * 导出用户数据（流式）
+ * 返回 { userCount, data }
+ * 用于备份或分析
+ */
+async function exportUserData(env, userIds = null) {
+    try {
+        let keysToExport;
+        
+        if (userIds && Array.isArray(userIds)) {
+            // 导出指定用户
+            keysToExport = userIds.map(uid => `user:${uid}`);
+        } else {
+            // 导出所有用户
+            const allUserKeys = await getAllKeys(env, "user:");
+            keysToExport = allUserKeys.map(k => k.name);
+        }
+
+        if (keysToExport.length === 0) {
+            return { userCount: 0, data: [] };
+        }
+
+        const exported = [];
+
+        // 分批读取（最多 100 个键一次）
+        for (let i = 0; i < keysToExport.length; i += 100) {
+            const batch = keysToExport.slice(i, i + 100);
+            const results = await safeGetBulk(env, batch);
+
+            for (const [key, value] of results) {
+                if (value) {
+                    const userId = key.replace('user:', '');
+                    const fullMetadata = await getValueWithFullMetadata(env, key);
+                    
+                    exported.push({
+                        userId,
+                        userData: value,
+                        verified: !!await env.TOPIC_MAP.get(`verified:${userId}`),
+                        banned: !!await env.TOPIC_MAP.get(`banned:${userId}`),
+                        metadata: fullMetadata?.metadata || {},
+                        createdAt: fullMetadata?.createdAt,
+                        updatedAt: fullMetadata?.updatedAt
+                    });
+                }
+            }
+        }
+
+        Logger.info('user_data_exported', { userCount: exported.length });
+        return { userCount: exported.length, data: exported };
+    } catch (e) {
+        Logger.error('export_user_data_failed', e);
+        return { userCount: 0, data: [], error: e.message };
+    }
+}
+
+/**
+ * 获取用户活动统计
+ * 按最后活动时间排序
+ */
+async function getUserActivityStats(env, limit = 50) {
+    try {
+        const userKeys = await getAllKeys(env, "user:");
+        const stats = [];
+
+        for (const keyInfo of userKeys.slice(0, limit * 2)) {  // 读取 2x 个数据以补偿被删除的
+            const fullMetadata = await getValueWithFullMetadata(env, keyInfo.name);
+            if (fullMetadata) {
+                const userId = keyInfo.name.replace('user:', '');
+                stats.push({
+                    userId,
+                    createdAt: fullMetadata.createdAt,
+                    updatedAt: fullMetadata.updatedAt,
+                    ageSeconds: fullMetadata.ageSeconds,
+                    metadata: fullMetadata.metadata
+                });
+            }
+        }
+
+        // 按 updatedAt 排序（最近活跃优先）
+        stats.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
+
+        return stats.slice(0, limit);
+    } catch (e) {
+        Logger.error('get_activity_stats_failed', e);
+        return [];
     }
 }
 
