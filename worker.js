@@ -49,7 +49,12 @@ const CONFIG = {
     CLEANUP_LOCK_TTL_SECONDS: 1800,     // 清理操作防并发锁
 
     // 重试
-    MAX_RETRY_ATTEMPTS: 3               // 消息转发最大重试次数
+    MAX_RETRY_ATTEMPTS: 3,              // 消息转发最大重试次数
+
+    // D1 写入重试
+    D1_WRITE_MAX_RETRIES: 3,            // D1 写入最大重试次数
+    D1_WRITE_BASE_DELAY_MS: 120,        // D1 写入重试基础延迟
+    D1_WRITE_MAX_DELAY_MS: 1200         // D1 写入最大延迟
 };
 
 // ============================================================================
@@ -64,6 +69,13 @@ const topicCreateInFlight = new Map();
 
 // 管理员权限缓存（实例内）
 const adminStatusCache = new Map();
+
+// 关键词缓存（实例内）
+const keywordCache = {
+    ts: 0,
+    list: []
+};
+
 
 // ============================================================================
 // 本地题库
@@ -239,6 +251,397 @@ async function safeGetBulk(env, keys, defaultValue = null) {
     }
 }
 
+// ============================================================================
+// D1 数据库工具
+// ============================================================================
+
+/**
+ * 判断是否启用 D1
+ */
+function hasD1(env) {
+    return !!env.TG_BOT_DB;
+}
+
+/**
+ * D1 写入重试判断
+ */
+function shouldRetryD1Error(error) {
+    const message = String(error?.message || error || "");
+    const retryable = [
+        "Network connection lost",
+        "Socket was closed",
+        "reset because its code was updated",
+        "storage reset because its code was updated"
+    ];
+    return retryable.some((text) => message.includes(text));
+}
+
+/**
+ * D1 写入重试包装
+ */
+async function runD1Write(env, action, fn) {
+    let attempt = 0;
+    while (true) {
+        try {
+            return await fn();
+        } catch (e) {
+            attempt++;
+            const shouldRetry = shouldRetryD1Error(e) && attempt < CONFIG.D1_WRITE_MAX_RETRIES;
+            if (!shouldRetry) {
+                Logger.error('d1_write_failed', e, { action, attempt });
+                throw e;
+            }
+            const base = CONFIG.D1_WRITE_BASE_DELAY_MS;
+            const max = CONFIG.D1_WRITE_MAX_DELAY_MS;
+            const delay = Math.min(max, base * (2 ** (attempt - 1)) + Math.floor(Math.random() * base));
+            Logger.warn('d1_write_retry', { action, attempt, delay });
+            await new Promise(resolve => setTimeout(resolve, delay));
+        }
+    }
+}
+
+/**
+ * 布尔值写入 D1（0/1）
+ */
+function toDbBool(val) {
+    return val ? 1 : 0;
+}
+
+/**
+ * 规范化用户记录
+ */
+function normalizeUserRecord(row) {
+    if (!row) return null;
+    return {
+        thread_id: row.thread_id ?? null,
+        title: row.title ?? null,
+        closed: row.closed ? true : false
+    };
+}
+
+/**
+ * 确保用户记录存在
+ */
+async function ensureUserRow(env, userId) {
+    if (!hasD1(env)) return;
+    const now = Date.now();
+    await runD1Write(env, 'user_insert', async () => {
+        await env.TG_BOT_DB
+            .prepare("INSERT OR IGNORE INTO users (user_id, created_at, updated_at) VALUES (?, ?, ?)")
+            .bind(String(userId), now, now)
+            .run();
+    });
+}
+
+/**
+ * 获取用户记录
+ */
+async function dbUserGet(env, userId) {
+    if (!hasD1(env)) return null;
+    const row = await env.TG_BOT_DB
+        .prepare("SELECT user_id, thread_id, title, closed FROM users WHERE user_id = ?")
+        .bind(String(userId))
+        .first();
+    return normalizeUserRecord(row);
+}
+
+/**
+ * 更新用户记录（部分字段）
+ */
+async function dbUserUpdate(env, userId, data = {}) {
+    if (!hasD1(env)) return;
+    await ensureUserRow(env, userId);
+
+    const fields = [];
+    const values = [];
+
+    if ("thread_id" in data) {
+        fields.push("thread_id = ?");
+        values.push(data.thread_id !== undefined ? (data.thread_id === null ? null : String(data.thread_id)) : null);
+    }
+    if ("title" in data) {
+        fields.push("title = ?");
+        values.push(data.title ?? null);
+    }
+    if ("closed" in data) {
+        fields.push("closed = ?");
+        values.push(toDbBool(!!data.closed));
+    }
+    if ("verify_state" in data) {
+        fields.push("verify_state = ?");
+        values.push(data.verify_state ?? null);
+    }
+    if ("verify_expires_at" in data) {
+        fields.push("verify_expires_at = ?");
+        values.push(data.verify_expires_at ?? null);
+    }
+    if ("is_blocked" in data) {
+        fields.push("is_blocked = ?");
+        values.push(toDbBool(!!data.is_blocked));
+    }
+    if ("user_info_json" in data) {
+        fields.push("user_info_json = ?");
+        values.push(data.user_info_json ?? null);
+    }
+
+    if (fields.length === 0) return;
+
+    const now = Date.now();
+    fields.push("updated_at = ?");
+    values.push(now);
+
+    await runD1Write(env, 'user_update', async () => {
+        await env.TG_BOT_DB
+            .prepare(`UPDATE users SET ${fields.join(", ")} WHERE user_id = ?`)
+            .bind(...values, String(userId))
+            .run();
+    });
+}
+
+/**
+ * 获取验证状态（带过期处理）
+ */
+async function dbGetVerifyState(env, userId) {
+    if (!hasD1(env)) return null;
+    const row = await env.TG_BOT_DB
+        .prepare("SELECT verify_state, verify_expires_at FROM users WHERE user_id = ?")
+        .bind(String(userId))
+        .first();
+
+    if (!row || !row.verify_state) return null;
+    if (row.verify_state === "trusted") return "trusted";
+
+    const expiresAt = Number(row.verify_expires_at || 0);
+    if (expiresAt && expiresAt < Date.now()) {
+        await dbUserUpdate(env, userId, { verify_state: null, verify_expires_at: null });
+        return null;
+    }
+
+    return row.verify_state;
+}
+
+/**
+ * 设置验证状态
+ */
+async function dbSetVerifyState(env, userId, state) {
+    if (!hasD1(env)) return;
+    if (!state) {
+        await dbUserUpdate(env, userId, { verify_state: null, verify_expires_at: null });
+        return;
+    }
+    const now = Date.now();
+    const expiresAt = state === "trusted" ? null : (now + CONFIG.VERIFIED_EXPIRE_SECONDS * 1000);
+    await dbUserUpdate(env, userId, { verify_state: state, verify_expires_at: expiresAt });
+}
+
+/**
+ * 获取封禁状态
+ */
+async function dbIsBanned(env, userId) {
+    if (!hasD1(env)) return false;
+    const row = await env.TG_BOT_DB
+        .prepare("SELECT is_blocked FROM users WHERE user_id = ?")
+        .bind(String(userId))
+        .first();
+    return !!(row && row.is_blocked);
+}
+
+/**
+ * 设置封禁状态
+ */
+async function dbSetBanned(env, userId, isBanned) {
+    if (!hasD1(env)) return;
+    await dbUserUpdate(env, userId, { is_blocked: !!isBanned });
+}
+
+/**
+ * 获取 thread -> user 映射
+ */
+async function dbThreadGetUserId(env, threadId) {
+    if (!hasD1(env)) return null;
+    const row = await env.TG_BOT_DB
+        .prepare("SELECT user_id FROM threads WHERE thread_id = ?")
+        .bind(String(threadId))
+        .first();
+    if (row?.user_id) return row.user_id;
+
+    const fallback = await env.TG_BOT_DB
+        .prepare("SELECT user_id FROM users WHERE thread_id = ?")
+        .bind(String(threadId))
+        .first();
+    if (fallback?.user_id) {
+        await dbThreadPut(env, threadId, fallback.user_id);
+        return fallback.user_id;
+    }
+    return null;
+}
+
+/**
+ * 写入 thread -> user 映射
+ */
+async function dbThreadPut(env, threadId, userId) {
+    if (!hasD1(env)) return;
+    await runD1Write(env, 'thread_put', async () => {
+        await env.TG_BOT_DB
+            .prepare("INSERT OR REPLACE INTO threads (thread_id, user_id) VALUES (?, ?)")
+            .bind(String(threadId), String(userId))
+            .run();
+    });
+}
+
+/**
+ * 删除 thread -> user 映射
+ */
+async function dbThreadDelete(env, threadId) {
+    if (!hasD1(env)) return;
+    await runD1Write(env, 'thread_delete', async () => {
+        await env.TG_BOT_DB
+            .prepare("DELETE FROM threads WHERE thread_id = ?")
+            .bind(String(threadId))
+            .run();
+    });
+}
+
+/**
+ * 写入消息映射
+ */
+async function dbMessageMapPut(env, sourceChatId, sourceMsgId, targetChatId, targetMsgId) {
+    if (!hasD1(env)) return;
+    const now = Date.now();
+    await runD1Write(env, 'message_map_put', async () => {
+        await env.TG_BOT_DB
+            .prepare(`INSERT OR REPLACE INTO messages
+                (source_chat_id, source_msg_id, target_chat_id, target_msg_id, created_at)
+                VALUES (?, ?, ?, ?, ?)`)
+            .bind(String(sourceChatId), String(sourceMsgId), String(targetChatId), String(targetMsgId), now)
+            .run();
+    });
+}
+
+/**
+ * 获取消息映射
+ */
+async function dbMessageMapGet(env, sourceChatId, sourceMsgId) {
+    if (!hasD1(env)) return null;
+    const row = await env.TG_BOT_DB
+        .prepare(`SELECT target_chat_id, target_msg_id, created_at
+                  FROM messages WHERE source_chat_id = ? AND source_msg_id = ?`)
+        .bind(String(sourceChatId), String(sourceMsgId))
+        .first();
+    if (!row) return null;
+    return {
+        targetChatId: row.target_chat_id,
+        targetMsgId: row.target_msg_id,
+        createdAt: row.created_at
+    };
+}
+
+/**
+ * 统计用户数量
+ */
+async function dbCount(env, whereSql = "", params = []) {
+    if (!hasD1(env)) return 0;
+    const sql = `SELECT COUNT(*) AS count FROM users ${whereSql}`;
+    const row = await env.TG_BOT_DB.prepare(sql).bind(...params).first();
+    return Number(row?.count || 0);
+}
+
+/**
+ * 按批次读取用户
+ */
+async function dbListUsers(env, limit, offset) {
+    if (!hasD1(env)) return [];
+    const result = await env.TG_BOT_DB
+        .prepare("SELECT user_id, thread_id, title, closed FROM users LIMIT ? OFFSET ?")
+        .bind(limit, offset)
+        .all();
+    return result?.results || [];
+}
+
+/**
+ * 获取关键词列表
+ */
+async function dbKeywordList(env) {
+    if (!hasD1(env)) return [];
+    const result = await env.TG_BOT_DB
+        .prepare("SELECT keyword FROM keywords ORDER BY id ASC")
+        .all();
+    return (result?.results || []).map(row => String(row.keyword)).filter(Boolean);
+}
+
+/**
+ * 新增关键词
+ */
+async function dbKeywordAdd(env, keyword) {
+    if (!hasD1(env)) return;
+    await runD1Write(env, 'keyword_add', async () => {
+        await env.TG_BOT_DB
+            .prepare("INSERT OR IGNORE INTO keywords (keyword, created_at) VALUES (?, ?)")
+            .bind(String(keyword), Date.now())
+            .run();
+    });
+    keywordCache.ts = 0;
+}
+
+/**
+ * 删除关键词
+ */
+async function dbKeywordDelete(env, keyword) {
+    if (!hasD1(env)) return;
+    await runD1Write(env, 'keyword_delete', async () => {
+        await env.TG_BOT_DB
+            .prepare("DELETE FROM keywords WHERE keyword = ?")
+            .bind(String(keyword))
+            .run();
+    });
+    keywordCache.ts = 0;
+}
+
+
+/**
+ * 获取关键词缓存
+ */
+async function getKeywordListCached(env) {
+    if (!hasD1(env)) return [];
+    const now = Date.now();
+    if (keywordCache.ts && (now - keywordCache.ts) < 60000 && keywordCache.list.length) {
+        return keywordCache.list;
+    }
+    const list = await dbKeywordList(env);
+    keywordCache.ts = now;
+    keywordCache.list = list;
+    return list;
+}
+
+/**
+ * 提取关键词过滤文本
+ */
+function getFilterText(msg) {
+    if (msg.text) return String(msg.text);
+    if (msg.caption) return String(msg.caption);
+    return "";
+}
+
+/**
+ * 关键词匹配
+ */
+async function matchKeyword(env, text) {
+    if (!text) return null;
+    const list = await getKeywordListCached(env);
+    if (!list.length) return null;
+    for (const keyword of list) {
+        const raw = String(keyword).trim();
+        if (!raw) continue;
+        try {
+            const re = new RegExp(raw, "i");
+            if (re.test(text)) return keyword;
+        } catch (e) {
+            Logger.warn('keyword_regex_invalid', { keyword: raw });
+        }
+    }
+    return null;
+}
+
 /**
  * 规范化 Telegram API 错误描述
  */
@@ -310,15 +713,25 @@ async function sendWelcomeCard(env, threadId, userId, userFrom) {
  * 使用并发保护避免重复创建
  */
 async function getOrCreateUserTopicRec(from, key, env, userId) {
-    const existing = await safeGetJSON(env, key, null);
-    if (existing && existing.thread_id) return existing;
+    if (hasD1(env)) {
+        const existing = await dbUserGet(env, userId);
+        if (existing && existing.thread_id) return existing;
+    } else {
+        const existing = await safeGetJSON(env, key, null);
+        if (existing && existing.thread_id) return existing;
+    }
 
     const inflight = topicCreateInFlight.get(String(userId));
     if (inflight) return await inflight;
 
     const p = (async () => {
-        const again = await safeGetJSON(env, key, null);
-        if (again && again.thread_id) return again;
+        if (hasD1(env)) {
+            const again = await dbUserGet(env, userId);
+            if (again && again.thread_id) return again;
+        } else {
+            const again = await safeGetJSON(env, key, null);
+            if (again && again.thread_id) return again;
+        }
         return await createTopic(from, key, env, userId);
     })();
 
@@ -403,16 +816,28 @@ async function probeForumThread(env, expectedThreadId, { userId, reason, doubleC
  * 重置用户验证并要求重新验证
  */
 async function resetUserVerificationAndRequireReverify(env, { userId, userKey, oldThreadId, pendingMsgId, reason, userFrom = null }) {
-    await env.TOPIC_MAP.delete(`verified:${userId}`);
+    if (hasD1(env)) {
+        await dbUserUpdate(env, userId, { verify_state: null, verify_expires_at: null });
+    } else {
+        await env.TOPIC_MAP.delete(`verified:${userId}`);
+    }
     await env.TOPIC_MAP.put(`needs_verify:${userId}`, "1", { expirationTtl: CONFIG.NEEDS_REVERIFY_TTL_SECONDS });
     await env.TOPIC_MAP.delete(`retry:${userId}`);
 
     if (userKey) {
-        await env.TOPIC_MAP.delete(userKey);
+        if (hasD1(env)) {
+            await dbUserUpdate(env, userId, { thread_id: null, title: null, closed: false });
+        } else {
+            await env.TOPIC_MAP.delete(userKey);
+        }
     }
 
     if (oldThreadId !== undefined && oldThreadId !== null) {
-        await env.TOPIC_MAP.delete(`thread:${oldThreadId}`);
+        if (hasD1(env)) {
+            await dbThreadDelete(env, oldThreadId);
+        } else {
+            await env.TOPIC_MAP.delete(`thread:${oldThreadId}`);
+        }
         await env.TOPIC_MAP.delete(`thread_ok:${oldThreadId}`);
         threadHealthCache.delete(oldThreadId);
     }
@@ -798,6 +1223,7 @@ export default {
     async fetch(request, env, ctx) {
         // 环境检查
         if (!env.TOPIC_MAP) return new Response("Error: KV 'TOPIC_MAP' not bound.");
+        if (!env.TG_BOT_DB) return new Response("Error: D1 'TG_BOT_DB' not bound.");
         if (!env.BOT_TOKEN) return new Response("Error: BOT_TOKEN not set.");
         if (!env.SUPERGROUP_ID) return new Response("Error: SUPERGROUP_ID not set.");
 
@@ -916,11 +1342,15 @@ async function forwardToTopic(msg, env, ctx) {
     }
 
     // 检查封禁
-    const isBanned = await env.TOPIC_MAP.get(`banned:${userId}`);
+    const isBanned = hasD1(env)
+        ? await dbIsBanned(env, userId)
+        : await env.TOPIC_MAP.get(`banned:${userId}`);
     if (isBanned) return;
 
     // 检查验证状态
-    const verified = await env.TOPIC_MAP.get(`verified:${userId}`);
+    const verified = hasD1(env)
+        ? await dbGetVerifyState(env, userId)
+        : await env.TOPIC_MAP.get(`verified:${userId}`);
     if (!verified) {
         const isStart = msg.text && msg.text.trim() === "/start";
         const pendingMsgId = isStart ? null : msg.message_id;
@@ -935,8 +1365,24 @@ async function forwardToTopic(msg, env, ctx) {
         return;
     }
 
+    // 关键词过滤
+    const filterText = getFilterText(msg);
+    if (filterText) {
+        const hitKeyword = await matchKeyword(env, filterText);
+        if (hitKeyword) {
+            await tgCall(env, "sendMessage", {
+                chat_id: userId,
+                text: "⚠️ 您的消息包含敏感关键词，已被拦截。"
+            });
+            Logger.info('keyword_blocked', { userId, keyword: hitKeyword });
+            return;
+        }
+    }
+
     // 获取用户话题记录
-    let rec = await safeGetJSON(env, key, null);
+    let rec = hasD1(env)
+        ? await dbUserGet(env, userId)
+        : await safeGetJSON(env, key, null);
 
     if (rec && rec.closed) {
         await tgCall(env, "sendMessage", { chat_id: userId, text: "🚫 当前对话已被管理员关闭。" });
@@ -968,9 +1414,16 @@ async function forwardToTopic(msg, env, ctx) {
 
     // 补建 thread->user 映射（兼容旧数据）
     if (rec && rec.thread_id) {
-        const mappedUser = await env.TOPIC_MAP.get(`thread:${rec.thread_id}`);
-        if (!mappedUser) {
-            await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
+        if (hasD1(env)) {
+            const mappedUser = await dbThreadGetUserId(env, rec.thread_id);
+            if (!mappedUser) {
+                await dbThreadPut(env, rec.thread_id, userId);
+            }
+        } else {
+            const mappedUser = await env.TOPIC_MAP.get(`thread:${rec.thread_id}`);
+            if (!mappedUser) {
+                await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
+            }
         }
     }
 
@@ -1134,15 +1587,19 @@ async function forwardToTopic(msg, env, ctx) {
     }
 
     // 记录消息映射关系
-    const mapKey = `msg_map:${String(userId)}:${msg.message_id}`;
-    const mapValue = JSON.stringify({
-        targetChatId: String(env.SUPERGROUP_ID),
-        targetMsgId: copyResult.result.message_id,
-        createdAt: Date.now()
-    });
-    await env.TOPIC_MAP.put(mapKey, mapValue, {
-        expirationTtl: CONFIG.MESSAGE_MAP_TTL_SECONDS
-    });
+    if (hasD1(env)) {
+        await dbMessageMapPut(env, userId, msg.message_id, env.SUPERGROUP_ID, copyResult.result.message_id);
+    } else {
+        const mapKey = `msg_map:${String(userId)}:${msg.message_id}`;
+        const mapValue = JSON.stringify({
+            targetChatId: String(env.SUPERGROUP_ID),
+            targetMsgId: copyResult.result.message_id,
+            createdAt: Date.now()
+        });
+        await env.TOPIC_MAP.put(mapKey, mapValue, {
+            expirationTtl: CONFIG.MESSAGE_MAP_TTL_SECONDS
+        });
+    }
 }
 
 /**
@@ -1164,18 +1621,53 @@ async function handleAdminReply(msg, env, ctx) {
         return;
     }
 
+    // /help 命令处理
+    if (text === "/help") {
+        const helpText = [
+            "🛠️ **管理员指令**",
+            "",
+            "/info - 显示当前用户信息",
+            "/close - 关闭对话",
+            "/open - 重新开启对话",
+            "/ban - 封禁用户",
+            "/unban - 解封用户",
+            "/trust - 设为永久信任",
+            "/reset - 重置验证状态",
+            "/cleanup - 清理已删除话题数据",
+            "/kw help - 关键词管理帮助"
+        ].join("\n");
+        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
+        return;
+    }
+
     // 查找用户 ID
     let userId = null;
-    const mappedUser = await env.TOPIC_MAP.get(`thread:${threadId}`);
-    if (mappedUser) {
-        userId = Number(mappedUser);
+    if (hasD1(env)) {
+        const mappedUser = await dbThreadGetUserId(env, threadId);
+        if (mappedUser) {
+            userId = Number(mappedUser);
+        } else {
+            const result = await env.TG_BOT_DB
+                .prepare("SELECT user_id FROM users WHERE thread_id = ?")
+                .bind(String(threadId))
+                .first();
+            if (result?.user_id) {
+                userId = Number(result.user_id);
+                await dbThreadPut(env, threadId, userId);
+            }
+        }
     } else {
-        const allKeys = await getAllKeys(env, "user:");
-        for (const { name } of allKeys) {
-            const rec = await safeGetJSON(env, name, null);
-            if (rec && Number(rec.thread_id) === Number(threadId)) {
-                userId = Number(name.slice(5));
-                break;
+        const mappedUser = await env.TOPIC_MAP.get(`thread:${threadId}`);
+        if (mappedUser) {
+            userId = Number(mappedUser);
+        } else {
+            const allKeys = await getAllKeys(env, "user:");
+            for (const { name } of allKeys) {
+                const rec = await safeGetJSON(env, name, null);
+                if (rec && Number(rec.thread_id) === Number(threadId)) {
+                    userId = Number(name.slice(5));
+                    break;
+                }
             }
         }
     }
@@ -1183,60 +1675,166 @@ async function handleAdminReply(msg, env, ctx) {
     if (!userId) return;
 
     // 管理员命令处理
-    if (text === "/close") {
-        const key = `user:${userId}`;
-        let rec = await safeGetJSON(env, key, null);
-        if (rec) {
-            rec.closed = true;
-            await env.TOPIC_MAP.put(key, JSON.stringify(rec));
-            await tgCall(env, "closeForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
-            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🚫 **对话已强制关闭**", parse_mode: "Markdown" });
+    if (text.startsWith("/kw")) {
+        if (!hasD1(env)) {
+            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "⚠️ 关键词功能需要绑定 D1 数据库。", parse_mode: "Markdown" });
+            return;
         }
+
+        const parts = text.split(" ").filter(Boolean);
+        const action = parts[1] || "help";
+        const keyword = parts.slice(2).join(" ").trim();
+
+        if (action === "add") {
+            if (!keyword) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词`", parse_mode: "Markdown" });
+                return;
+            }
+            await dbKeywordAdd(env, keyword);
+            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已添加关键词：\`${keyword}\``, parse_mode: "Markdown" });
+            return;
+        }
+
+        if (action === "del") {
+            if (!keyword) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw del 关键词`", parse_mode: "Markdown" });
+                return;
+            }
+            await dbKeywordDelete(env, keyword);
+            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已删除关键词：\`${keyword}\``, parse_mode: "Markdown" });
+            return;
+        }
+
+        if (action === "list") {
+            const list = await dbKeywordList(env);
+            if (!list.length) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "当前暂无关键词。", parse_mode: "Markdown" });
+                return;
+            }
+            const textList = list.slice(0, 50).map((k, i) => `${i + 1}. ${k}`).join("\n");
+            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `📌 **关键词列表**\n\n${textList}`, parse_mode: "Markdown" });
+            return;
+        }
+
+        if (action === "test") {
+            const rest = text.replace(/^\/kw\s+test\s+/i, "");
+            const [pattern, ...textParts] = rest.split(" ");
+            const sample = textParts.join(" ").trim();
+            if (!pattern || !sample) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw test <表达式> <文本>`", parse_mode: "Markdown" });
+                return;
+            }
+            try {
+                const re = new RegExp(pattern, "i");
+                const matched = re.test(sample);
+                const resultText = matched ? "✅ 匹配成功" : "❌ 未命中";
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `${resultText}\n表达式：\`${pattern}\`\n文本：\`${sample}\``, parse_mode: "Markdown" });
+            } catch (e) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `❌ 正则语法错误：\`${e.message}\``, parse_mode: "Markdown" });
+            }
+            return;
+        }
+
+        if (action === "help") {
+            const helpText = [
+                "🔎 **关键词管理**",
+                "",
+                "/kw add 关键词 - 添加关键词",
+                "/kw del 关键词 - 删除关键词",
+                "/kw list - 查看关键词列表",
+                "/kw test <表达式> <文本> - 测试正则是否命中"
+            ].join("\n");
+            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
+            return;
+        }
+
+        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词` / `/kw del 关键词` / `/kw list` / `/kw test <表达式> <文本>` / `/kw help`", parse_mode: "Markdown" });
+        return;
+    }
+
+    if (text === "/close") {
+        if (hasD1(env)) {
+            await dbUserUpdate(env, userId, { closed: true });
+        } else {
+            const key = `user:${userId}`;
+            let rec = await safeGetJSON(env, key, null);
+            if (rec) {
+                rec.closed = true;
+                await env.TOPIC_MAP.put(key, JSON.stringify(rec));
+            }
+        }
+        await tgCall(env, "closeForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
+        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🚫 **对话已强制关闭**", parse_mode: "Markdown" });
         return;
     }
 
     if (text === "/open") {
-        const key = `user:${userId}`;
-        let rec = await safeGetJSON(env, key, null);
-        if (rec) {
-            rec.closed = false;
-            await env.TOPIC_MAP.put(key, JSON.stringify(rec));
-            await tgCall(env, "reopenForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
-            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "✅ **对话已恢复**", parse_mode: "Markdown" });
+        if (hasD1(env)) {
+            await dbUserUpdate(env, userId, { closed: false });
+        } else {
+            const key = `user:${userId}`;
+            let rec = await safeGetJSON(env, key, null);
+            if (rec) {
+                rec.closed = false;
+                await env.TOPIC_MAP.put(key, JSON.stringify(rec));
+            }
         }
+        await tgCall(env, "reopenForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
+        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "✅ **对话已恢复**", parse_mode: "Markdown" });
         return;
     }
 
     if (text === "/reset") {
-        await env.TOPIC_MAP.delete(`verified:${userId}`);
+        if (hasD1(env)) {
+            await dbSetVerifyState(env, userId, null);
+        } else {
+            await env.TOPIC_MAP.delete(`verified:${userId}`);
+        }
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🔄 **验证重置**", parse_mode: "Markdown" });
         return;
     }
 
     if (text === "/trust") {
-        await env.TOPIC_MAP.put(`verified:${userId}`, "trusted");
+        if (hasD1(env)) {
+            await dbSetVerifyState(env, userId, "trusted");
+        } else {
+            await env.TOPIC_MAP.put(`verified:${userId}`, "trusted");
+        }
         await env.TOPIC_MAP.delete(`needs_verify:${userId}`);
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🌟 **已设置永久信任**", parse_mode: "Markdown" });
         return;
     }
 
     if (text === "/ban") {
-        await env.TOPIC_MAP.put(`banned:${userId}`, "1");
+        if (hasD1(env)) {
+            await dbSetBanned(env, userId, true);
+        } else {
+            await env.TOPIC_MAP.put(`banned:${userId}`, "1");
+        }
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🚫 **用户已封禁**", parse_mode: "Markdown" });
         return;
     }
 
     if (text === "/unban") {
-        await env.TOPIC_MAP.delete(`banned:${userId}`);
+        if (hasD1(env)) {
+            await dbSetBanned(env, userId, false);
+        } else {
+            await env.TOPIC_MAP.delete(`banned:${userId}`);
+        }
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "✅ **用户已解封**", parse_mode: "Markdown" });
         return;
     }
 
     if (text === "/info") {
-        const userKey = `user:${userId}`;
-        const userRec = await safeGetJSON(env, userKey, null);
-        const verifyStatus = await env.TOPIC_MAP.get(`verified:${userId}`);
-        const banStatus = await env.TOPIC_MAP.get(`banned:${userId}`);
+        const userRec = hasD1(env)
+            ? await dbUserGet(env, userId)
+            : await safeGetJSON(env, `user:${userId}`, null);
+        const verifyStatus = hasD1(env)
+            ? await dbGetVerifyState(env, userId)
+            : await env.TOPIC_MAP.get(`verified:${userId}`);
+        const banStatus = hasD1(env)
+            ? await dbIsBanned(env, userId)
+            : await env.TOPIC_MAP.get(`banned:${userId}`);
 
         const info = `👤 **用户信息**\nUID: \`${userId}\`\nTopic ID: \`${threadId}\`\n话题标题: ${userRec?.title || "未知"}\n验证状态: ${verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证'}\n封禁状态: ${banStatus ? '🚫 已封禁' : '✅ 正常'}\nLink: [点击私聊](tg://user?id=${userId})`;
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: info, parse_mode: "Markdown" });
@@ -1256,15 +1854,19 @@ async function handleAdminReply(msg, env, ctx) {
     });
 
     if (copyResult.ok) {
-        const mapKey = `msg_map:${String(env.SUPERGROUP_ID)}:${msg.message_id}`;
-        const mapValue = JSON.stringify({
-            targetChatId: String(userId),
-            targetMsgId: copyResult.result.message_id,
-            createdAt: Date.now()
-        });
-        await env.TOPIC_MAP.put(mapKey, mapValue, {
-            expirationTtl: CONFIG.MESSAGE_MAP_TTL_SECONDS
-        });
+        if (hasD1(env)) {
+            await dbMessageMapPut(env, env.SUPERGROUP_ID, msg.message_id, userId, copyResult.result.message_id);
+        } else {
+            const mapKey = `msg_map:${String(env.SUPERGROUP_ID)}:${msg.message_id}`;
+            const mapValue = JSON.stringify({
+                targetChatId: String(userId),
+                targetMsgId: copyResult.result.message_id,
+                createdAt: Date.now()
+            });
+            await env.TOPIC_MAP.put(mapKey, mapValue, {
+                expirationTtl: CONFIG.MESSAGE_MAP_TTL_SECONDS
+            });
+        }
     }
 }
 
@@ -1434,7 +2036,11 @@ async function handleCallbackQuery(query, env, ctx) {
             });
 
             // 标记为已验证
-            await env.TOPIC_MAP.put(`verified:${userId}`, "1", { expirationTtl: CONFIG.VERIFIED_EXPIRE_SECONDS });
+            if (hasD1(env)) {
+                await dbSetVerifyState(env, userId, "1");
+            } else {
+                await env.TOPIC_MAP.put(`verified:${userId}`, "1", { expirationTtl: CONFIG.VERIFIED_EXPIRE_SECONDS });
+            }
             await env.TOPIC_MAP.delete(`needs_verify:${userId}`);
 
             // 清理验证数据
@@ -1557,26 +2163,21 @@ async function handleCleanupCommand(threadId, env) {
     let cleanedCount = 0;
     let errorCount = 0;
     const cleanedUsers = [];
-    const keysToDelete = [];
     let scannedCount = 0;
 
     try {
-        let cursor = undefined;
-        do {
-            const result = await env.TOPIC_MAP.list({ prefix: "user:", cursor });
-            const names = (result.keys || []).map(k => k.name);
-            scannedCount += names.length;
-
-            for (let i = 0; i < names.length; i += CONFIG.CLEANUP_BATCH_SIZE) {
-                const batch = names.slice(i, i + CONFIG.CLEANUP_BATCH_SIZE);
+        if (hasD1(env)) {
+            let offset = 0;
+            while (true) {
+                const rows = await dbListUsers(env, CONFIG.CLEANUP_BATCH_SIZE, offset);
+                if (!rows.length) break;
+                scannedCount += rows.length;
 
                 const results = await Promise.allSettled(
-                    batch.map(async (name) => {
-                        const rec = await safeGetJSON(env, name, null);
-                        if (!rec || !rec.thread_id) return null;
-
-                        const userId = name.slice(5);
-                        const topicThreadId = rec.thread_id;
+                    rows.map(async (row) => {
+                        if (!row.thread_id) return null;
+                        const userId = row.user_id;
+                        const topicThreadId = row.thread_id;
 
                         const probe = await probeForumThread(env, topicThreadId, {
                             userId,
@@ -1585,17 +2186,18 @@ async function handleCleanupCommand(threadId, env) {
                         });
 
                         if (probe.status === "redirected" || probe.status === "missing") {
-                            // 使用 deleteBulk 批量删除相关键
-                            keysToDelete.push(
-                                name,
-                                `verified:${userId}`,
-                                `thread:${topicThreadId}`
-                            );
+                            await resetUserVerificationAndRequireReverify(env, {
+                                userId,
+                                userKey: null,
+                                oldThreadId: topicThreadId,
+                                pendingMsgId: null,
+                                reason: "cleanup_check"
+                            });
 
                             return {
                                 userId,
                                 threadId: topicThreadId,
-                                title: rec.title || "未知"
+                                title: row.title || "未知"
                             };
                         } else if (probe.status === "probe_invalid") {
                             Logger.warn('cleanup_probe_invalid_message', {
@@ -1631,30 +2233,102 @@ async function handleCleanupCommand(threadId, env) {
                     }
                 });
 
-                if (i + CONFIG.CLEANUP_BATCH_SIZE < names.length) {
-                    await new Promise(r => setTimeout(r, 600));
-                }
-            }
-
-            cursor = result.list_complete ? undefined : result.cursor;
-
-            if (cursor) {
+                offset += rows.length;
                 await new Promise(r => setTimeout(r, 200));
             }
-        } while (cursor);
+        } else {
+            const keysToDelete = [];
+            let cursor = undefined;
+            do {
+                const result = await env.TOPIC_MAP.list({ prefix: "user:", cursor });
+                const names = (result.keys || []).map(k => k.name);
+                scannedCount += names.length;
 
-        // 批量删除所有收集的键
-        if (keysToDelete.length > 0) {
-            const deletedCount = await deleteBulk(env, keysToDelete);
-            Logger.info('cleanup_bulk_delete', { deletedKeyCount: deletedCount });
+                for (let i = 0; i < names.length; i += CONFIG.CLEANUP_BATCH_SIZE) {
+                    const batch = names.slice(i, i + CONFIG.CLEANUP_BATCH_SIZE);
+
+                    const results = await Promise.allSettled(
+                        batch.map(async (name) => {
+                            const rec = await safeGetJSON(env, name, null);
+                            if (!rec || !rec.thread_id) return null;
+
+                            const userId = name.slice(5);
+                            const topicThreadId = rec.thread_id;
+
+                            const probe = await probeForumThread(env, topicThreadId, {
+                                userId,
+                                reason: "cleanup_check",
+                                doubleCheckOnMissingThreadId: false
+                            });
+
+                            if (probe.status === "redirected" || probe.status === "missing") {
+                                keysToDelete.push(
+                                    name,
+                                    `verified:${userId}`,
+                                    `thread:${topicThreadId}`
+                                );
+
+                                return {
+                                    userId,
+                                    threadId: topicThreadId,
+                                    title: rec.title || "未知"
+                                };
+                            } else if (probe.status === "probe_invalid") {
+                                Logger.warn('cleanup_probe_invalid_message', {
+                                    userId,
+                                    threadId: topicThreadId,
+                                    errorDescription: probe.description
+                                });
+                            } else if (probe.status === "unknown_error") {
+                                Logger.warn('cleanup_probe_failed_unknown', {
+                                    userId,
+                                    threadId: topicThreadId,
+                                    errorDescription: probe.description
+                                });
+                            } else if (probe.status === "missing_thread_id") {
+                                Logger.warn('cleanup_probe_missing_thread_id', { userId, threadId: topicThreadId });
+                            }
+
+                            return null;
+                        })
+                    );
+
+                    results.forEach(result => {
+                        if (result.status === 'fulfilled' && result.value) {
+                            cleanedCount++;
+                            cleanedUsers.push(result.value);
+                            Logger.info('cleanup_user', {
+                                userId: result.value.userId,
+                                threadId: result.value.threadId
+                            });
+                        } else if (result.status === 'rejected') {
+                            errorCount++;
+                            Logger.error('cleanup_batch_error', result.reason);
+                        }
+                    });
+
+                    if (i + CONFIG.CLEANUP_BATCH_SIZE < names.length) {
+                        await new Promise(r => setTimeout(r, 600));
+                    }
+                }
+
+                cursor = result.list_complete ? undefined : result.cursor;
+
+                if (cursor) {
+                    await new Promise(r => setTimeout(r, 200));
+                }
+            } while (cursor);
+
+            if (keysToDelete.length > 0) {
+                const deletedCount = await deleteBulk(env, keysToDelete);
+                Logger.info('cleanup_bulk_delete', { deletedKeyCount: deletedCount });
+            }
         }
 
-        // 生成报告
         let reportText = `✅ **清理完成**\n\n`;
         reportText += `📊 **统计信息**\n`;
         reportText += `- 扫描用户数: ${scannedCount}\n`;
         reportText += `- 已清理用户数: ${cleanedCount}\n`;
-        reportText += `- 删除键数: ${keysToDelete.length}\n`;
         reportText += `- 错误数: ${errorCount}\n\n`;
 
         if (cleanedCount > 0) {
@@ -1673,8 +2347,7 @@ async function handleCleanupCommand(threadId, env) {
         Logger.info('cleanup_completed', {
             cleanedCount,
             errorCount,
-            totalUsers: scannedCount,
-            deletedKeyCount: keysToDelete.length
+            totalUsers: scannedCount
         });
 
         await tgCall(env, "sendMessage", withMessageThreadId({
@@ -1709,18 +2382,29 @@ async function createTopic(from, key, env, userId) {
     if (!res.ok) throw new Error(`创建话题失败: ${res.description}`);
     
     const rec = { thread_id: res.result.message_thread_id, title, closed: false };
-    
-    // 使用元数据记录创建时间
-    await putWithMetadata(env, key, rec, {
-        expirationTtl: null,
-        metadata: { 
-            userId: String(userId),
-            threadId: res.result.message_thread_id
+
+    if (hasD1(env)) {
+        await dbUserUpdate(env, userId, {
+            thread_id: rec.thread_id,
+            title: rec.title,
+            closed: false
+        });
+        if (userId) {
+            await dbThreadPut(env, rec.thread_id, userId);
         }
-    });
-    
-    if (userId) {
-        await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
+    } else {
+        // 使用元数据记录创建时间
+        await putWithMetadata(env, key, rec, {
+            expirationTtl: null,
+            metadata: { 
+                userId: String(userId),
+                threadId: res.result.message_thread_id
+            }
+        });
+        
+        if (userId) {
+            await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
+        }
     }
     return rec;
 }
@@ -1730,6 +2414,31 @@ async function createTopic(from, key, env, userId) {
  */
 async function updateThreadStatus(threadId, isClosed, env) {
     try {
+        if (hasD1(env)) {
+            const mappedUser = await dbThreadGetUserId(env, threadId);
+            if (mappedUser) {
+                const rec = await dbUserGet(env, mappedUser);
+                if (rec && Number(rec.thread_id) === Number(threadId)) {
+                    await dbUserUpdate(env, mappedUser, { closed: isClosed });
+                    Logger.info('thread_status_updated', { threadId, isClosed, updatedCount: 1 });
+                    return;
+                }
+                await dbThreadDelete(env, threadId);
+            }
+
+            const result = await env.TG_BOT_DB
+                .prepare("SELECT user_id FROM users WHERE thread_id = ?")
+                .bind(String(threadId))
+                .all();
+
+            const rows = result?.results || [];
+            for (const row of rows) {
+                await dbUserUpdate(env, row.user_id, { closed: isClosed });
+            }
+            Logger.info('thread_status_updated', { threadId, isClosed, updatedCount: rows.length });
+            return;
+        }
+
         const mappedUser = await env.TOPIC_MAP.get(`thread:${threadId}`);
         if (mappedUser) {
             const userKey = `user:${mappedUser}`;
@@ -2032,22 +2741,38 @@ async function delaySend(env, key, ts) {
  */
 async function getBotStats(env) {
     try {
+        const queueKeys = await getAllKeys(env, QUEUE_PREFIX);
+        if (hasD1(env)) {
+            const totalUsers = await dbCount(env);
+            const verifiedUsers = await dbCount(env, "WHERE verify_state IS NOT NULL");
+            const bannedUsers = await dbCount(env, "WHERE is_blocked = 1");
+            const totalTopics = await dbCount(env, "WHERE thread_id IS NOT NULL");
+            const closedTopics = await dbCount(env, "WHERE thread_id IS NOT NULL AND closed = 1");
+
+            return {
+                totalUsers,
+                verifiedUsers,
+                bannedUsers,
+                totalTopics,
+                closedTopics,
+                activeTopics: totalTopics - closedTopics,
+                queuedMessages: queueKeys.length,
+                timestamp: Date.now()
+            };
+        }
+
         const userKeys = await getAllKeys(env, "user:");
         const verifiedKeys = await getAllKeys(env, "verified:");
         const bannedKeys = await getAllKeys(env, "banned:");
-        const queueKeys = await getAllKeys(env, QUEUE_PREFIX);
 
-        // 获取所有用户的元数据用于统计
         const userDataMap = await safeGetBulk(env, userKeys.map(k => k.name));
         
         let totalTopics = 0;
         let closedTopics = 0;
-        const topicIds = new Set();
 
         for (const [, userData] of userDataMap) {
             if (userData && userData.thread_id) {
                 totalTopics++;
-                topicIds.add(userData.thread_id);
                 if (userData.closed) closedTopics++;
             }
         }
@@ -2075,13 +2800,60 @@ async function getBotStats(env) {
  */
 async function exportUserData(env, userIds = null) {
     try {
+        const exported = [];
+
+        if (hasD1(env)) {
+            if (userIds && Array.isArray(userIds) && userIds.length > 0) {
+                const placeholders = userIds.map(() => "?").join(",");
+                const result = await env.TG_BOT_DB
+                    .prepare(`SELECT * FROM users WHERE user_id IN (${placeholders})`)
+                    .bind(...userIds.map(String))
+                    .all();
+                for (const row of result?.results || []) {
+                    exported.push({
+                        userId: row.user_id,
+                        userData: {
+                            thread_id: row.thread_id,
+                            title: row.title,
+                            closed: !!row.closed
+                        },
+                        verified: !!row.verify_state,
+                        banned: !!row.is_blocked,
+                        metadata: {},
+                        createdAt: row.created_at,
+                        updatedAt: row.updated_at
+                    });
+                }
+            } else {
+                const result = await env.TG_BOT_DB
+                    .prepare("SELECT * FROM users")
+                    .all();
+                for (const row of result?.results || []) {
+                    exported.push({
+                        userId: row.user_id,
+                        userData: {
+                            thread_id: row.thread_id,
+                            title: row.title,
+                            closed: !!row.closed
+                        },
+                        verified: !!row.verify_state,
+                        banned: !!row.is_blocked,
+                        metadata: {},
+                        createdAt: row.created_at,
+                        updatedAt: row.updated_at
+                    });
+                }
+            }
+
+            Logger.info('user_data_exported', { userCount: exported.length });
+            return { userCount: exported.length, data: exported };
+        }
+
         let keysToExport;
         
         if (userIds && Array.isArray(userIds)) {
-            // 导出指定用户
             keysToExport = userIds.map(uid => `user:${uid}`);
         } else {
-            // 导出所有用户
             const allUserKeys = await getAllKeys(env, "user:");
             keysToExport = allUserKeys.map(k => k.name);
         }
@@ -2090,9 +2862,6 @@ async function exportUserData(env, userIds = null) {
             return { userCount: 0, data: [] };
         }
 
-        const exported = [];
-
-        // 分批读取（最多 100 个键一次）
         for (let i = 0; i < keysToExport.length; i += 100) {
             const batch = keysToExport.slice(i, i + 100);
             const results = await safeGetBulk(env, batch);
@@ -2129,10 +2898,24 @@ async function exportUserData(env, userIds = null) {
  */
 async function getUserActivityStats(env, limit = 50) {
     try {
+        if (hasD1(env)) {
+            const result = await env.TG_BOT_DB
+                .prepare("SELECT user_id, created_at, updated_at FROM users ORDER BY updated_at DESC LIMIT ?")
+                .bind(limit)
+                .all();
+            return (result?.results || []).map(row => ({
+                userId: row.user_id,
+                createdAt: row.created_at,
+                updatedAt: row.updated_at,
+                ageSeconds: row.created_at ? Math.floor((Date.now() - row.created_at) / 1000) : null,
+                metadata: {}
+            }));
+        }
+
         const userKeys = await getAllKeys(env, "user:");
         const stats = [];
 
-        for (const keyInfo of userKeys.slice(0, limit * 2)) {  // 读取 2x 个数据以补偿被删除的
+        for (const keyInfo of userKeys.slice(0, limit * 2)) {
             const fullMetadata = await getValueWithFullMetadata(env, keyInfo.name);
             if (fullMetadata) {
                 const userId = keyInfo.name.replace('user:', '');
@@ -2146,7 +2929,6 @@ async function getUserActivityStats(env, limit = 50) {
             }
         }
 
-        // 按 updatedAt 排序（最近活跃优先）
         stats.sort((a, b) => (b.updatedAt || 0) - (a.updatedAt || 0));
 
         return stats.slice(0, limit);
@@ -2170,8 +2952,9 @@ async function handleEditedMessage(msg, env, ctx) {
         const sourceChatId = msg.chat.id;
         const sourceMsgId = msg.message_id;
 
-        const mapKey = `msg_map:${String(sourceChatId)}:${sourceMsgId}`;
-        const targetInfo = await safeGetJSON(env, mapKey, null);
+        const targetInfo = hasD1(env)
+            ? await dbMessageMapGet(env, sourceChatId, sourceMsgId)
+            : await safeGetJSON(env, `msg_map:${String(sourceChatId)}:${sourceMsgId}`, null);
 
         if (targetInfo) {
             const { targetChatId, targetMsgId } = targetInfo;
@@ -2209,15 +2992,17 @@ async function handleEditedMessage(msg, env, ctx) {
         const userId = msg.chat.id;
         const sourceMsgId = msg.message_id;
 
-        const userKey = `user:${userId}`;
-        const userRec = await safeGetJSON(env, userKey, null);
+        const userRec = hasD1(env)
+            ? await dbUserGet(env, userId)
+            : await safeGetJSON(env, `user:${userId}`, null);
 
         if (!userRec || !userRec.thread_id) {
             return;
         }
 
-        const mapKey = `msg_map:${String(userId)}:${sourceMsgId}`;
-        const targetInfo = await safeGetJSON(env, mapKey, null);
+        const targetInfo = hasD1(env)
+            ? await dbMessageMapGet(env, userId, sourceMsgId)
+            : await safeGetJSON(env, `msg_map:${String(userId)}:${sourceMsgId}`, null);
 
         if (targetInfo) {
             const { targetChatId, targetMsgId } = targetInfo;
