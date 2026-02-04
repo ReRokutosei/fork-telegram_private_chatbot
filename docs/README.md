@@ -1,8 +1,14 @@
 # Telegram 双向转发机器人
 
 > [!TIP]
-> （2026.02.03）相对于 [原项目（96ffd6b）](https://github.com/jikssha/telegram_private_chatbot/commit/96ffd6b492694ce68ce0f52d76630b5516425f93)，本 fork **主要变更**：
->
+> 相对于 [原项目（96ffd6b）](https://github.com/jikssha/telegram_private_chatbot/commit/96ffd6b492694ce68ce0f52d76630b5516425f93)，本 fork **主要变更**：
+> 
+> （2026.02.04）：
+> - 引入 D1+KV 混合存储，核心数据迁移至 D1
+> - 新增关键词过滤（正则匹配）
+> - 新增 `/help` 命令
+> 
+> （2026.02.03）：
 > - [由转发消息重构为**中介模式**，支持 24 小时内**双向消息编辑同步**](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/54d5fd13e2f9d4c15066fb75250f452829c2b873)
 > - [限流逻辑迁移至 Durable Object，并引入 SQLite + 内存缓存](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/d2181a0f9f4ad4cb910b667144074e02d401d7b9)
 > - [优化 KV 操作（批量、缓存、重试等）](https://github.com/ReRokutosei/fork-telegram_private_chatbot/commit/ff0736c2798af8a16cd7f6e04f49b559cc696cbb)
@@ -10,6 +16,33 @@
 > - 完善文档步骤说明，**添加截图示意**
 
 本项目是一个基于 **Cloudflare Workers** 的 Telegram 机器人，实现 **用户私聊消息** 与 **群组话题（Topics）** 之间的一对一双向转发。
+
+<div align="center">
+
+⚠️ **【部署前提】** 
+**不具备以下账号，请勿尝试部署！**
+
+</div>
+
+> [!CAUTION]
+> **❗ 本项目依赖 Cloudflare 生态与 Telegram Bot，部署有不可绕过的硬性前提。若缺少以下任一条件，部署将失败。**
+>
+> - ✅ **已通过付款验证的 Cloudflare 账号**  
+>   - （即使使用免费额度，也必须绑定并成功验证信用卡或 PayPal 等）
+> - ✅ **可用的 Telegram 账号**  
+>   - （没有 TG 账号你来凑热闹吗？）
+>
+> - 🔸 **GitHub 账号**：  
+>   - 若选择 **手动部署**（在 Cloudflare Dashboard `从Hello World!开始` 直接编辑或导入代码），则 **不需要 GitHub 账号**。  
+>   - 若选择 **自动部署**（Fork 本仓库 + Connect to Github），则 **需要 GitHub 账号**。  
+>   - 本教程采用 **自动部署方式**，不提供纯手动部署指导。
+>
+> **❌ 若你没有 Cloudflare 或 Telegram 账号，请不要继续阅读。**
+>
+> **⛔ 作者不提供无账号支持、代部署、付款验证绕过等任何形式的协助。**
+
+> [!TIP]
+> 没有 Cloudflare 账号，建议阅读该项目 -> [fork-tg-pm-bot](https://github.com/ReRokutosei/fork-tg-pm-bot)
 
 ---
 
@@ -24,18 +57,23 @@
     - [管理功能](#管理功能)
     - [安全与性能](#安全与性能)
   - [部署教程](#部署教程)
-    - [步骤 1：Bot Token](#步骤-1bot-token)
-    - [步骤 2：管理员群组](#步骤-2管理员群组)
-    - [步骤 3：Fork 仓库](#步骤-3fork-仓库)
-    - [步骤 4：创建 Worker 应用](#步骤-4创建-worker-应用)
-    - [步骤 5：连接 GitHub](#步骤-5连接-github)
-    - [步骤 6：配置部署参数](#步骤-6配置部署参数)
-    - [步骤 7：绑定 KV 与环境变量](#步骤-7绑定-kv-与环境变量)
-    - [步骤 8：激活 Webhook](#步骤-8激活-webhook)
-    - [步骤 9：（可选）配置 Durable Object](#步骤-9可选配置-durable-object)
+    - [步骤 01：Bot Token](#步骤-01bot-token)
+    - [步骤 02：管理员群组](#步骤-02管理员群组)
+    - [步骤 03：Fork 仓库](#步骤-03fork-仓库)
+    - [步骤 04：创建 Worker 应用](#步骤-04创建-worker-应用)
+    - [步骤 05：连接 GitHub](#步骤-05连接-github)
+    - [步骤 06：配置部署参数](#步骤-06配置部署参数)
+    - [步骤 07：创建 D1 数据库](#步骤-07创建-d1-数据库)
+    - [步骤 08：绑定 D1 数据库](#步骤-08绑定-d1-数据库)
+    - [步骤 09：创建并绑定 KV 命名空间](#步骤-09创建并绑定-kv-命名空间)
+    - [步骤 10：添加环境变量](#步骤-10添加环境变量)
+    - [步骤 11：激活 Webhook](#步骤-11激活-webhook)
+    - [步骤 12：开始使用](#步骤-12开始使用)
+    - [步骤 13：（可选）配置 Durable Object](#步骤-13可选配置-durable-object)
   - [管理员指令说明](#管理员指令说明)
+    - [关键词过滤用法](#关键词过滤用法)
   - [常见问题（FAQ）](#常见问题faq)
-  - [安全说明](#安全说明)
+  - [参考](#参考)
 
 
 ---
@@ -44,7 +82,7 @@
 
 * **运行环境**：Cloudflare Workers
 * **语言**：JavaScript
-* **存储**：Cloudflare KV
+* **存储**：Cloudflare D1 + KV
 * **可选组件**：Durable Object
 * **通信方式**：Telegram Bot Webhook
 
@@ -68,17 +106,20 @@
 * 永久信任用户机制（`/trust`）
 * 用户封禁 / 解封
 * 对话关闭 / 重新开启
+* 关键词过滤（正则匹配）
 
 ### 管理功能
 
 * 仅允许管理员在话题内执行管理命令
 * 管理员权限缓存，减少 Telegram API 调用
 * 自动检测被删除的话题并清理数据
+* 关键词过滤管理（`/kw add` / `/kw del` / `/kw list` / `/kw test`）
 
 ### 安全与性能
 
 * 使用加密安全随机数生成验证 ID
 * 用户与管理员权限隔离
+* D1 + KV 混合存储，核心数据持久化、临时数据缓存
 * 可选 Durable Object 实现原子级限流
 * 并发保护，避免重复创建话题
 
@@ -86,14 +127,17 @@
 
 ## 部署教程
 
-### 步骤 1：Bot Token
+> [!IMPORTANT]
+> 🛑 再次提醒：请确保你已拥有 **Cloudflare、Telegram** 账号。缺少任一将导致部署失败。
+
+### 步骤 01：Bot Token
 
 在 Telegram 搜索 [@BotFather](https://t.me/BotFather) 并使用它创建一个 Telegram 机器人，获取 **Bot Token**。
   - 与它对话，输入 `/newbot` 开始创建机器人
   - 按照说明设置机器人昵称和ID
   - 完成之后，它会返回一个 Token ,点击即可复制
 
-### 步骤 2：管理员群组
+### 步骤 02：管理员群组
 
 1. 在 Telegram 创建一个群组
    - 群组类型可为`私人`
@@ -117,14 +161,14 @@
 
 ---
 
-### 步骤 3：Fork 仓库
+### 步骤 03：Fork 仓库
 
 * 将本项目 Fork 到你的 GitHub 账户。
-* 修改[wrangler.tomlname](wrangler.toml)
+* 修改文件 **wrangler.toml**
   * 将`name = 'terminal-aide-0017'`改为任意自定义项目名称，**后续需要用到**
   * 注意名称只能包含小写字母（a-z）、数字（0-9）和连字符
 
-### 步骤 4：创建 Worker 应用
+### 步骤 04：创建 Worker 应用
 
 1. 登录 [Cloudflare Dashboard](https://dash.cloudflare.com/)。
 2. 进入 **Workers 和 Pages**。
@@ -132,33 +176,124 @@
 
 ![](./20260131150240.webp)
 
-### 步骤 5：连接 GitHub
+### 步骤 05：连接 GitHub
 
-1. 选择 **Connect to Git** 标签页。
+1. 选择 **Connect to Github** 标签页。
 2. 授权 Cloudflare 访问你的 GitHub。
 3. 选择你 Fork 的 `telegram_private_chatbot` 仓库。
 
 ![](./20260131150305.webp)
 
-### 步骤 6：配置部署参数
+### 步骤 06：配置部署参数
 
 * **项目名称**：`terminal-aide-0017`
   * 或任意名称，注意要和步骤一的 `name` 对应，否则会部署失败
   * 如果步骤一未更改 `name`，Cloudflare 会在 GitHub 自动发起一个 PR
-  * 为避免麻烦和等待，建议在步骤 1 就完成这一步
+  * 为避免麻烦和等待，建议在步骤 01 就完成这一步
 * **生产分支**：`main`
 * 其余选项保持默认
 * 点击 **部署**
 
 ![](./20260131151125.webp)
 
-### 步骤 7：绑定 KV 与环境变量
+### 步骤 07：创建 D1 数据库
 
-部署完成后：
+1. 进入 **存储和数据库** -> **D1 SQL 数据库**
+2. 点击 **创建数据库**，名称可填写 `tg-bot-db`（或任意名称）
+	- 数据库名称只能包含小写字母 (a-z)、数字 (0-9)、下划线 (_) 和连字符 (-)
 
-1. **创建并绑定 KV 命名空间**：
-   * 在左侧菜单 **存储和数据库** -> **Wokers KV** 中创建一个命名空间
-   * 点击**Create Instance**，命名空间名称可填写`TOPIC_MAP`
+3. **数据位置** 让CF自动选择即可
+4. 进入数据库 **控制台**，执行以下建表 SQL：
+
+![](./20260204184010.webp)
+
+![](./20260204184134.webp)
+
+> [!CAUTION]
+> ⚠️ **注意**：控制台一次仅支持执行一条 SQL 语句
+>
+> 请**逐条复制并执行**以下命令，不要一次性粘贴全部内容！
+>
+> 也不要忘记语句末尾的分号！
+>
+> - 复制第一条（从 `CREATE TABLE users` 到它后面的 `;`）
+> - 粘贴到 D1 控制台 → 点击“运行”
+> - 成功后，再复制下一条（比如 `CREATE TABLE messages` 到它的 `;`）
+> - 重复直到全部语句执行完毕
+
+![](./20260204185756.webp)
+
+```sql
+CREATE TABLE IF NOT EXISTS users (
+    user_id TEXT PRIMARY KEY,
+    thread_id TEXT,
+    title TEXT,
+    closed INTEGER,
+    verify_state TEXT,
+    verify_expires_at INTEGER,
+    is_blocked INTEGER,
+    user_info_json TEXT,
+    created_at INTEGER,
+    updated_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS messages (
+    source_chat_id TEXT,
+    source_msg_id TEXT,
+    target_chat_id TEXT,
+    target_msg_id TEXT,
+    created_at INTEGER,
+    PRIMARY KEY (source_chat_id, source_msg_id)
+);
+
+CREATE TABLE IF NOT EXISTS threads (
+    thread_id TEXT PRIMARY KEY,
+    user_id TEXT
+);
+
+CREATE TABLE IF NOT EXISTS keywords (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    keyword TEXT UNIQUE,
+    created_at INTEGER
+);
+
+CREATE TABLE IF NOT EXISTS config (
+    key TEXT PRIMARY KEY,
+    value TEXT
+);
+
+-- 索引优化（提升 thread_id/状态统计的查询性能）
+CREATE INDEX IF NOT EXISTS idx_users_thread_id ON users(thread_id);
+CREATE INDEX IF NOT EXISTS idx_users_updated_at ON users(updated_at);
+CREATE INDEX IF NOT EXISTS idx_users_verify_state ON users(verify_state);
+CREATE INDEX IF NOT EXISTS idx_users_is_blocked ON users(is_blocked);
+```
+
+上述索引主要优化 `thread_id` 反查、活跃排序、验证与封禁统计等高频查询。
+
+> 可选维护建议：数据库迁移或大量写入后，可在 D1 控制台执行 `PRAGMA optimize;` 进行轻量优化。
+
+全部执行完毕，你应该能看到类似下图：
+
+![](./20260204185943.webp)
+
+### 步骤 08：绑定 D1 数据库
+
+1. 返回 Worker 设置页面，进入 **设置** -> **绑定** -> **D1 数据库**。
+2. 点击 **添加绑定**：
+   * 变量名称：`TG_BOT_DB`
+   * 数据库：下拉选择刚刚创建的 D1 数据库
+
+![](./20260204201437.webp)
+
+![](./20260204201719.webp)
+
+![](./20260204201843.webp)
+
+### 步骤 09：创建并绑定 KV 命名空间
+
+- 在左侧菜单 **存储和数据库** -> **Wokers KV** 中创建一个命名空间
+- 点击**Create Instance**，命名空间名称可填写`TOPIC_MAP`
 
 ![](./20260131152401.webp)
 
@@ -166,21 +301,23 @@
 
 ![](./20260131152419.webp)
 
-* 返回 Worker 设置页面
-	* 左侧菜单栏 -> **计算和 AI** -> **Wokers 和 Pages**
-* 在 **KV 命名空间** 中添加绑定：
+- 返回 Worker 设置页面
+	- 左侧菜单栏 -> **计算和 AI** -> **Wokers 和 Pages**
+- 在 **KV 命名空间** 中添加绑定：
 
-	* 变量名称：`TOPIC_MAP`（必须全大写）
-	* 命名空间：选择刚创建的 KV
+	- 变量名称：`TOPIC_MAP`（必须全大写）
+	- 命名空间：下拉选择刚创建的 KV 命名空间
 
-![](./20260131152530.webp)
+![](./20260204202053.webp)
 
 ![](./20260131152552.webp)
 
 ![](./20260131152611.webp)
 
-2. **添加环境变量**：
-  - **Workers和Pages** -> **设置** -> **添加**变量和机密
+---
+
+### 步骤 10：添加环境变量
+**Workers和Pages** -> **设置** -> **添加**变量和机密
 
 ![](./20260131152712.webp)
 
@@ -193,7 +330,7 @@
 
 ---
 
-### 步骤 8：激活 Webhook
+### 步骤 11：激活 Webhook
 
 这一步需要手动设置 Telegram Webhook。
 
@@ -211,6 +348,7 @@ https://api.telegram.org/bot<YOUR_TOKEN>/setWebhook?url=<YOUR_WORKER_URL>
 
 
 * Woker 的访问地址可以在图中的蓝色按钮找到（鼠标右键它以复制 URL）
+  * 该按钮也可以用于验证部署情况，直接点击该访问按钮，跳转的网址也应该返回一个 `OK`，否则，请检查步骤
 
 ![](./20260131154439.webp)
 
@@ -230,7 +368,14 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 
 ---
 
-### 步骤 9：（可选）配置 Durable Object
+### 步骤 12：开始使用
+最后一步
+
+将你创建的机器人名字写到 tg 账号资料卡的简介即可
+
+比如 `请通过 @My_bot联系我，直接私聊将被静默归档且拉黑`，记得 `@` 的前面留一个空格，以便 tg 识别
+
+### 步骤 13：（可选）配置 Durable Object
 
 本步骤为启用基于 Durable Object 的强一致性限流机制
 
@@ -243,7 +388,7 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
   - 耐用对象是自动导出的 `{ProjectName_RateLimitDO}` ，下拉选中即可
   - 如果没发现有可选的耐用对象，请**至少部署成功一次**再重新绑定
 
-![](./20260202024414.webp)
+![](./20260204202916.webp)
 
 ![](./20260202024546.webp)
 
@@ -266,6 +411,49 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 |  `/trust`  | 将用户标记为永久信任               |
 |  `/reset`  | 清除验证状态，要求重新验证         |
 | `/cleanup` | 清理已被删除话题的残留数据         |
+|  `/help`   | 查看管理员指令帮助                 |
+| `/kw add`  | 添加关键词过滤                  |
+| `/kw del`  | 删除关键词过滤                  |
+| `/kw list` | 查看关键词列表                  |
+| `/kw test` | 测试正则表达式                  |
+| `/kw help` | 查看关键词管理帮助                |
+
+### 关键词过滤用法
+
+1. 添加关键词  
+在话题内发送：`/kw add 关键词`
+
+2. 删除关键词  
+在话题内发送：`/kw del 关键词`
+
+3. 查看列表  
+在话题内发送：`/kw list`
+
+4. 测试表达式  
+在话题内发送：`/kw test <表达式> <文本>`
+
+> [!TIP]
+> - 说明：关键词使用**正则匹配**。表达式语法错误会提示失败，可用 `/kw test` 先验证。
+> - 部分第三方客户端有 `发送消息Pangu化` 这个设置项，设置、测试关键词时，请关闭该设置项，以免表达式错误
+>   - `发送消息Pangu化`: 使文字更具可读性。在CJK（中文、日文、韩文）、半宽英文、数字和符号字符之间的间隔中自动插入空格。
+
+**示例用法**
+
+1. 添加关键词示例 I
+`/kw add 退款`
+
+2. 添加关键词示例 II
+`/kw add (优惠|折扣|返现)`
+
+3. 测试规则  
+`/kw test (优惠|折扣|返现) 这个是折扣信息`
+
+4. 查看已设置关键词与删除  
+`/kw list`  
+`/kw del 退款`
+
+5. 查看帮助  
+`/kw help`
 
 ---
 
@@ -302,9 +490,9 @@ https://api.telegram.org/bot<TOKEN>/deleteWebhook?drop_pending_updates=true
 <details><summary><strong>点击查看</strong></summary>
 A3: 
 
-一般是 Cloudflare 的问题，当你部署完成后，改动了其他设置或者在 GitHub 推送更新，之前绑定的**KV 命名空间**和**DO 耐用对象**会莫名 失效/消失/自动解绑，请检查并手动重新绑定
+一般是 Cloudflare 的问题，当你部署完成后，改动了某些设置或者在 GitHub 推送更新，之前绑定的**D1 数据库**、**KV 命名空间**和**DO 耐用对象**会莫名 失效/自动解绑，请检查并手动重新绑定
 
-注：可以在 Cloudflare Woker面板设置中添加排除监听路径，排除文档变更的 commit 触发重新构建 
+注：可以在 Cloudflare Woker 面板设置中添加排除监听路径，排除文档变更的 commit 触发重新构建 
 
 <img src="./20260203022734.webp" width="1500" />
 
@@ -312,9 +500,10 @@ A3:
 
 ---
 
-## 安全说明
-> [!CAUTION]
-> * 不要在代码中硬编码 Bot Token
-> * KV 数据为明文存储，请勿保存敏感信息
-> * 谨慎使用 `/trust` 与 `/ban`
-> * 定期执行 `/cleanup` 清理无效数据
+## 参考
+
+1. https://github.com/lige47/tg-pm-bot
+2. https://github.com/moistrr/TGbot-D1/
+
+<div style="text-align: center;"><strong>如果对你有帮助还请点个⭐！</strong></div>
+
