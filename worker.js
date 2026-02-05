@@ -1803,11 +1803,23 @@ async function handleAdminReply(msg, env, ctx) {
         if (action === "list") {
             const list = await dbKeywordListWithId(env);
             if (!list.length) {
-                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "当前暂无关键词。", parse_mode: "Markdown" });
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "当前暂无关键词。" });
                 return;
             }
-            const textList = list.slice(0, 50).map((k, i) => `${i + 1}. [id=${k.id}] ${k.keyword}`).join("\n");
-            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `📌 **关键词列表**\n\n${textList}`, parse_mode: "Markdown" });
+            const items = list.slice(0, 50).map((k, i) => `${i + 1}. [id=${k.id}] ${k.keyword}`);
+            const header = "📌 关键词列表";
+            const maxLen = 3800;
+            let buffer = `${header}\n\n`;
+            for (const line of items) {
+                if ((buffer.length + line.length + 1) > maxLen) {
+                    await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: buffer.trimEnd() });
+                    buffer = "";
+                }
+                buffer += (buffer ? "\n" : "") + line;
+            }
+            if (buffer.trim()) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: buffer.trimEnd() });
+            }
             return;
         }
 
