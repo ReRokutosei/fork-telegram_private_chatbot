@@ -54,7 +54,11 @@ const CONFIG = {
     // D1 写入重试
     D1_WRITE_MAX_RETRIES: 3,            // D1 写入最大重试次数
     D1_WRITE_BASE_DELAY_MS: 120,        // D1 写入重试基础延迟
-    D1_WRITE_MAX_DELAY_MS: 1200         // D1 写入最大延迟
+    D1_WRITE_MAX_DELAY_MS: 1200,        // D1 写入最大延迟
+
+    // 关键词过滤
+    KEYWORD_MAX_LENGTH: 200,            // 关键词最大长度
+    KEYWORD_MATCH_MAX_TEXT_LENGTH: 4000 // 关键词匹配最大文本长度
 };
 
 // ============================================================================
@@ -656,18 +660,52 @@ function getFilterText(msg) {
 }
 
 /**
+ * 校验关键词表达式安全性
+ */
+function validateKeywordPattern(raw) {
+    const pattern = String(raw || "").trim();
+    if (!pattern) return { ok: false, reason: "关键词不能为空" };
+    if (pattern.length > CONFIG.KEYWORD_MAX_LENGTH) {
+        return { ok: false, reason: `关键词过长（最大 ${CONFIG.KEYWORD_MAX_LENGTH} 字符）` };
+    }
+
+    const dotAnyCount = (pattern.match(/(\.\*|\.\+)/g) || []).length;
+    if (dotAnyCount > 2) {
+        return { ok: false, reason: "包含过多任意匹配（.* / .+）" };
+    }
+
+    const nestedQuantifier = /(\([^)]*[+*][^)]*\)[+*?]|\([^)]*\{[^}]+\}[^)]*\)[+*?]|\([^)]*[+*][^)]*\)\{\d*,?\d*\})/;
+    if (nestedQuantifier.test(pattern)) {
+        return { ok: false, reason: "疑似嵌套量词" };
+    }
+
+    const repeatWithDotAny = /\([^)]*(\.\*|\.\+)[^)]*\)\{\d*,?\d*\}/;
+    if (repeatWithDotAny.test(pattern)) {
+        return { ok: false, reason: "包含高风险的重复匹配结构" };
+    }
+
+    return { ok: true, reason: "" };
+}
+
+/**
  * 关键词匹配
  */
 async function matchKeyword(env, text) {
     if (!text) return null;
+    const targetText = String(text).slice(0, CONFIG.KEYWORD_MATCH_MAX_TEXT_LENGTH);
     const list = await getKeywordListCached(env);
     if (!list.length) return null;
     for (const keyword of list) {
         const raw = String(keyword).trim();
         if (!raw) continue;
+        const validation = validateKeywordPattern(raw);
+        if (!validation.ok) {
+            Logger.warn('keyword_pattern_blocked', { keyword: raw, reason: validation.reason });
+            continue;
+        }
         try {
             const re = new RegExp(raw, "i");
-            if (re.test(text)) return keyword;
+            if (re.test(targetText)) return keyword;
         } catch (e) {
             Logger.warn('keyword_regex_invalid', { keyword: raw });
         }
@@ -1724,6 +1762,11 @@ async function handleAdminReply(msg, env, ctx) {
                 await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词`", parse_mode: "Markdown" });
                 return;
             }
+            const validation = validateKeywordPattern(restText);
+            if (!validation.ok) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `❌ 关键词规则被拒绝：${validation.reason}`, parse_mode: "Markdown" });
+                return;
+            }
             await dbKeywordAdd(env, restText);
             await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已添加关键词：\`${restText}\``, parse_mode: "Markdown" });
             return;
@@ -1776,6 +1819,11 @@ async function handleAdminReply(msg, env, ctx) {
                 await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw test <表达式> <文本>`", parse_mode: "Markdown" });
                 return;
             }
+            const validation = validateKeywordPattern(pattern);
+            if (!validation.ok) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `❌ 关键词规则被拒绝：${validation.reason}`, parse_mode: "Markdown" });
+                return;
+            }
             try {
                 const re = new RegExp(pattern, "i");
                 const matched = re.test(sample);
@@ -1795,7 +1843,15 @@ async function handleAdminReply(msg, env, ctx) {
                 "/kw del 关键词 - 删除关键词",
                 "/kw del id <id> - 按 ID 删除关键词",
                 "/kw list - 查看关键词列表",
-                "/kw test <表达式> <文本> - 测试正则是否命中"
+                "/kw test <表达式> <文本> - 测试正则是否命中",
+                "",
+                "规则限制：",
+                `1) 关键词长度上限 ${CONFIG.KEYWORD_MAX_LENGTH} 字符`,
+                `2) 过滤仅匹配前 ${CONFIG.KEYWORD_MATCH_MAX_TEXT_LENGTH} 字符`,
+                "3) 正则限制：",
+                "- `.*` / `.+` 出现超过 2 次会被拒绝",
+                "- 嵌套量词会被拒绝（如 `(a+)+`、`(.+)+`、`(.+)*`、`(.*)+`）",
+                "- 形如 `(.*){2,}`、`(.+){1,}` 的重复结构会被拒绝"
             ].join("\n");
             await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
             return;
