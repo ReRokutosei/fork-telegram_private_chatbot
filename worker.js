@@ -570,6 +570,19 @@ async function dbKeywordList(env) {
 }
 
 /**
+ * 获取关键词列表（含 ID）
+ */
+async function dbKeywordListWithId(env) {
+    if (!hasD1(env)) return [];
+    const result = await env.TG_BOT_DB
+        .prepare("SELECT id, keyword FROM keywords ORDER BY id ASC")
+        .all();
+    return (result?.results || [])
+        .map(row => ({ id: Number(row.id), keyword: String(row.keyword) }))
+        .filter(row => row.keyword);
+}
+
+/**
  * 新增关键词
  */
 async function dbKeywordAdd(env, keyword) {
@@ -587,14 +600,34 @@ async function dbKeywordAdd(env, keyword) {
  * 删除关键词
  */
 async function dbKeywordDelete(env, keyword) {
-    if (!hasD1(env)) return;
+    if (!hasD1(env)) return 0;
+    let changes = 0;
     await runD1Write(env, 'keyword_delete', async () => {
-        await env.TG_BOT_DB
+        const result = await env.TG_BOT_DB
             .prepare("DELETE FROM keywords WHERE keyword = ?")
             .bind(String(keyword))
             .run();
+        changes = Number(result?.meta?.changes ?? result?.changes ?? 0);
     });
     keywordCache.ts = 0;
+    return changes;
+}
+
+/**
+ * 按 ID 删除关键词
+ */
+async function dbKeywordDeleteById(env, id) {
+    if (!hasD1(env)) return 0;
+    let changes = 0;
+    await runD1Write(env, 'keyword_delete', async () => {
+        const result = await env.TG_BOT_DB
+            .prepare("DELETE FROM keywords WHERE id = ?")
+            .bind(Number(id))
+            .run();
+        changes = Number(result?.meta?.changes ?? result?.changes ?? 0);
+    });
+    keywordCache.ts = 0;
+    return changes;
 }
 
 
@@ -1372,7 +1405,7 @@ async function forwardToTopic(msg, env, ctx) {
         if (hitKeyword) {
             await tgCall(env, "sendMessage", {
                 chat_id: userId,
-                text: "⚠️ 您的消息包含敏感关键词，已被拦截。"
+                text: "⚠️ 该消息触发过滤条件，已被拦截。"
             });
             Logger.info('keyword_blocked', { userId, keyword: hitKeyword });
             return;
@@ -1683,35 +1716,54 @@ async function handleAdminReply(msg, env, ctx) {
 
         const parts = text.split(" ").filter(Boolean);
         const action = parts[1] || "help";
-        const keyword = parts.slice(2).join(" ").trim();
+        const subAction = parts[2] || "";
+        const restText = parts.slice(2).join(" ").trim();
 
         if (action === "add") {
-            if (!keyword) {
+            if (!restText) {
                 await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词`", parse_mode: "Markdown" });
                 return;
             }
-            await dbKeywordAdd(env, keyword);
-            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已添加关键词：\`${keyword}\``, parse_mode: "Markdown" });
+            await dbKeywordAdd(env, restText);
+            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已添加关键词：\`${restText}\``, parse_mode: "Markdown" });
             return;
         }
 
         if (action === "del") {
-            if (!keyword) {
-                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw del 关键词`", parse_mode: "Markdown" });
+            if (!restText) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw del 关键词` 或 `/kw del id <id>`", parse_mode: "Markdown" });
                 return;
             }
-            await dbKeywordDelete(env, keyword);
-            await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已删除关键词：\`${keyword}\``, parse_mode: "Markdown" });
+            if (subAction === "id") {
+                const idText = parts[3];
+                if (!idText || !/^\d+$/.test(idText)) {
+                    await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw del id <id>`", parse_mode: "Markdown" });
+                    return;
+                }
+                const changes = await dbKeywordDeleteById(env, Number(idText));
+                if (changes > 0) {
+                    await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已删除关键词（ID）：\`${idText}\``, parse_mode: "Markdown" });
+                } else {
+                    await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `❌ 未找到关键词（ID）：\`${idText}\``, parse_mode: "Markdown" });
+                }
+                return;
+            }
+            const changes = await dbKeywordDelete(env, restText);
+            if (changes > 0) {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `✅ 已删除关键词：\`${restText}\``, parse_mode: "Markdown" });
+            } else {
+                await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `❌ 未找到关键词：\`${restText}\``, parse_mode: "Markdown" });
+            }
             return;
         }
 
         if (action === "list") {
-            const list = await dbKeywordList(env);
+            const list = await dbKeywordListWithId(env);
             if (!list.length) {
                 await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "当前暂无关键词。", parse_mode: "Markdown" });
                 return;
             }
-            const textList = list.slice(0, 50).map((k, i) => `${i + 1}. ${k}`).join("\n");
+            const textList = list.slice(0, 50).map((k, i) => `${i + 1}. [id=${k.id}] ${k.keyword}`).join("\n");
             await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: `📌 **关键词列表**\n\n${textList}`, parse_mode: "Markdown" });
             return;
         }
@@ -1741,6 +1793,7 @@ async function handleAdminReply(msg, env, ctx) {
                 "",
                 "/kw add 关键词 - 添加关键词",
                 "/kw del 关键词 - 删除关键词",
+                "/kw del id <id> - 按 ID 删除关键词",
                 "/kw list - 查看关键词列表",
                 "/kw test <表达式> <文本> - 测试正则是否命中"
             ].join("\n");
@@ -1748,7 +1801,7 @@ async function handleAdminReply(msg, env, ctx) {
             return;
         }
 
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词` / `/kw del 关键词` / `/kw list` / `/kw test <表达式> <文本>` / `/kw help`", parse_mode: "Markdown" });
+        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词` / `/kw del 关键词` / `/kw del id <id>` / `/kw list` / `/kw test <表达式> <文本>` / `/kw help`", parse_mode: "Markdown" });
         return;
     }
 

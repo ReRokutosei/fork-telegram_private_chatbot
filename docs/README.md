@@ -414,6 +414,7 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 |  `/help`   | 查看管理员指令帮助                 |
 | `/kw add`  | 添加关键词过滤                  |
 | `/kw del`  | 删除关键词过滤                  |
+| `/kw del id <id>` | 按 ID 删除关键词过滤          |
 | `/kw list` | 查看关键词列表                  |
 | `/kw test` | 测试正则表达式                  |
 | `/kw help` | 查看关键词管理帮助                |
@@ -426,14 +427,18 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 2. 删除关键词  
 在话题内发送：`/kw del 关键词`
 
-3. 查看列表  
+3. 查看关键词 ID 及列表  
 在话题内发送：`/kw list`
 
-4. 测试表达式  
+4. 删除关键词（按 ID）  
+在话题内发送：`/kw del id <id>`
+
+5. 测试表达式  
 在话题内发送：`/kw test <表达式> <文本>`
 
 > [!TIP]
 > - 说明：关键词使用**正则匹配**。表达式语法错误会提示失败，可用 `/kw test` 先验证。
+> - `/kw list` 会显示关键词的 `id`，删除时可用 `/kw del id <id>` 删除。
 > - 部分第三方客户端有 `发送消息Pangu化` 这个设置项，设置、测试关键词时，请关闭该设置项，以免表达式错误
 >   - `发送消息Pangu化`: 使文字更具可读性。在CJK（中文、日文、韩文）、半宽英文、数字和符号字符之间的间隔中自动插入空格。
 
@@ -452,7 +457,10 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 `/kw list`  
 `/kw del 退款`
 
-5. 查看帮助  
+5. 按 ID 删除  
+`/kw del id 23`
+
+6. 查看帮助  
 `/kw help`
 
 ---
