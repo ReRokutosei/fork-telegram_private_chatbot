@@ -1680,6 +1680,8 @@ async function handleAdminReply(msg, env, ctx) {
     const threadId = msg.message_thread_id;
     const text = (msg.text || "").trim();
     const senderId = msg.from?.id;
+    const parts = text.split(/\s+/).filter(Boolean);
+    const baseCmd = parts[0] || "";
 
     // 权限检查
     if (!senderId || !(await isAdminUser(env, senderId))) {
@@ -1708,6 +1710,79 @@ async function handleAdminReply(msg, env, ctx) {
             "/kw help - 关键词管理帮助"
         ].join("\n");
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
+        return;
+    }
+
+    // 允许任意话题执行的管理指令
+    if (baseCmd === "/kw" && parts[1] === "list") {
+        if (!hasD1(env)) {
+            const warnText = "⚠️ 关键词功能需要绑定 D1 数据库。";
+            const payload = { chat_id: env.SUPERGROUP_ID, text: warnText, parse_mode: "Markdown" };
+            if (threadId) payload.message_thread_id = threadId;
+            await tgCall(env, "sendMessage", payload);
+            return;
+        }
+
+        const list = await dbKeywordListWithId(env);
+        if (!list.length) {
+            const payload = { chat_id: env.SUPERGROUP_ID, text: "当前暂无关键词。" };
+            if (threadId) payload.message_thread_id = threadId;
+            await tgCall(env, "sendMessage", payload);
+            return;
+        }
+
+        const items = list.slice(0, 50).map((k, i) => `${i + 1}. [id=${k.id}] ${k.keyword}`);
+        const header = "📌 关键词列表";
+        const maxLen = 3800;
+        let buffer = `${header}\n\n`;
+        for (const line of items) {
+            if ((buffer.length + line.length + 1) > maxLen) {
+                const payload = { chat_id: env.SUPERGROUP_ID, text: buffer.trimEnd() };
+                if (threadId) payload.message_thread_id = threadId;
+                await tgCall(env, "sendMessage", payload);
+                buffer = "";
+            }
+            buffer += (buffer ? "\n" : "") + line;
+        }
+        if (buffer.trim()) {
+            const payload = { chat_id: env.SUPERGROUP_ID, text: buffer.trimEnd() };
+            if (threadId) payload.message_thread_id = threadId;
+            await tgCall(env, "sendMessage", payload);
+        }
+        return;
+    }
+
+    if (baseCmd === "/ban" && parts[1] && /^\d+$/.test(parts[1])) {
+        const targetUserId = Number(parts[1]);
+        if (hasD1(env)) {
+            await dbSetBanned(env, targetUserId, true);
+        } else {
+            await env.TOPIC_MAP.put(`banned:${targetUserId}`, "1");
+        }
+        const payload = {
+            chat_id: env.SUPERGROUP_ID,
+            text: `🚫 **用户已封禁**\nUID: \`${targetUserId}\``,
+            parse_mode: "Markdown"
+        };
+        if (threadId) payload.message_thread_id = threadId;
+        await tgCall(env, "sendMessage", payload);
+        return;
+    }
+
+    if (baseCmd === "/unban" && parts[1] && /^\d+$/.test(parts[1])) {
+        const targetUserId = Number(parts[1]);
+        if (hasD1(env)) {
+            await dbSetBanned(env, targetUserId, false);
+        } else {
+            await env.TOPIC_MAP.delete(`banned:${targetUserId}`);
+        }
+        const payload = {
+            chat_id: env.SUPERGROUP_ID,
+            text: `✅ **用户已解封**\nUID: \`${targetUserId}\``,
+            parse_mode: "Markdown"
+        };
+        if (threadId) payload.message_thread_id = threadId;
+        await tgCall(env, "sendMessage", payload);
         return;
     }
 

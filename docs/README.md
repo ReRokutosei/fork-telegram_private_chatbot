@@ -398,8 +398,9 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 
 ## 管理员指令说明
 
-> 所有管理指令 **仅在群组的话题内有效**。
+> 所有管理指令 **仅在群组内有效**。
 > 私聊中发送的管理指令会被忽略，不会产生任何反馈。
+> 其中 `/ban <id>`、`/unban <id>`、`/kw list` 可在**任意话题**内执行。
 
 |    指令    | 作用                               |
 | :--------: | :-------------------------------- |
@@ -407,7 +408,9 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 |  `/close`  | 关闭对话，拒绝该用户的新消息       |
 |  `/open`   | 重新开启已关闭的对话               |
 |   `/ban`   | 封禁用户                           |
+| `/ban <id>` | 按用户 ID 封禁（任意话题可用）     |
 |  `/unban`  | 解封用户                           |
+| `/unban <id>` | 按用户 ID 解封（任意话题可用） |
 |  `/trust`  | 将用户标记为永久信任               |
 |  `/reset`  | 清除验证状态，要求重新验证         |
 | `/cleanup` | 清理已被删除话题的残留数据         |
@@ -415,7 +418,7 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 | `/kw add`  | 添加关键词过滤                  |
 | `/kw del`  | 删除关键词过滤                  |
 | `/kw del id <id>` | 按 ID 删除关键词过滤          |
-| `/kw list` | 查看关键词列表                  |
+| `/kw list` | 查看关键词列表（任意话题可用）  |
 | `/kw test` | 测试正则表达式                  |
 | `/kw help` | 查看关键词管理帮助                |
 
