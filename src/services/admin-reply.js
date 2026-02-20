@@ -5,7 +5,10 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     const text = (msg.text || "").trim();
     const senderId = msg.from?.id;
     const parts = text.split(/\s+/).filter(Boolean);
-    const baseCmd = parts[0] || "";
+    const rawCmd = parts[0] || "";
+    // 群组命令可能为 /cmd@BotName，统一归一化到 /cmd
+    const baseCmd = rawCmd.split("@")[0].toLowerCase();
+    const args = parts.slice(1);
 
     // 权限检查
     if (!senderId || !(await isAdminUser(env, senderId))) {
@@ -13,13 +16,13 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     }
 
     // /cleanup 命令处理
-    if (text === "/cleanup") {
+    if (baseCmd === "/cleanup") {
         ctx.waitUntil(handleCleanupCommand(threadId, env));
         return;
     }
 
     // /help 命令处理
-    if (text === "/help") {
+    if (baseCmd === "/help") {
         const helpText = [
             "🛠️ **管理员指令**",
             "",
@@ -38,7 +41,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     }
 
     // 允许任意话题执行的管理指令
-    if (baseCmd === "/kw" && parts[1] === "list") {
+    if (baseCmd === "/kw" && (args[0] || "").toLowerCase() === "list") {
         if (!hasD1(env)) {
             const warnText = "⚠️ 关键词功能需要绑定 D1 数据库。";
             const payload = { chat_id: env.SUPERGROUP_ID, text: warnText, parse_mode: "Markdown" };
@@ -76,8 +79,8 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (baseCmd === "/ban" && parts[1] && /^\d+$/.test(parts[1])) {
-        const targetUserId = Number(parts[1]);
+    if (baseCmd === "/ban" && args[0] && /^\d+$/.test(args[0])) {
+        const targetUserId = Number(args[0]);
         if (hasD1(env)) {
             await dbSetBanned(env, targetUserId, true);
         } else {
@@ -93,8 +96,8 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (baseCmd === "/unban" && parts[1] && /^\d+$/.test(parts[1])) {
-        const targetUserId = Number(parts[1]);
+    if (baseCmd === "/unban" && args[0] && /^\d+$/.test(args[0])) {
+        const targetUserId = Number(args[0]);
         if (hasD1(env)) {
             await dbSetBanned(env, targetUserId, false);
         } else {
@@ -142,19 +145,29 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         }
     }
 
-    if (!userId) return;
+    if (!userId) {
+        if (baseCmd === "/ban" || baseCmd === "/unban") {
+            const payload = {
+                chat_id: env.SUPERGROUP_ID,
+                text: "❌ 无法识别目标用户。\n请在用户话题内执行，或使用 `/ban <id>` / `/unban <id>`。",
+                parse_mode: "Markdown"
+            };
+            if (threadId) payload.message_thread_id = threadId;
+            await tgCall(env, "sendMessage", payload);
+        }
+        return;
+    }
 
     // 管理员命令处理
-    if (text.startsWith("/kw")) {
+    if (baseCmd === "/kw") {
         if (!hasD1(env)) {
             await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "⚠️ 关键词功能需要绑定 D1 数据库。", parse_mode: "Markdown" });
             return;
         }
 
-        const parts = text.split(" ").filter(Boolean);
-        const action = parts[1] || "help";
-        const subAction = parts[2] || "";
-        const restText = parts.slice(2).join(" ").trim();
+        const action = (args[0] || "help").toLowerCase();
+        const subAction = (args[1] || "").toLowerCase();
+        const restText = args.slice(1).join(" ").trim();
 
         if (action === "add") {
             if (!restText) {
@@ -223,8 +236,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         }
 
         if (action === "test") {
-            const rest = text.replace(/^\/kw\s+test\s+/i, "");
-            const [pattern, ...textParts] = rest.split(" ");
+            const [pattern, ...textParts] = args.slice(1);
             const sample = textParts.join(" ").trim();
             if (!pattern || !sample) {
                 await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw test <表达式> <文本>`", parse_mode: "Markdown" });
@@ -272,7 +284,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/close") {
+    if (baseCmd === "/close") {
         if (hasD1(env)) {
             await dbUserUpdate(env, userId, { closed: true });
         } else {
@@ -288,7 +300,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/open") {
+    if (baseCmd === "/open") {
         if (hasD1(env)) {
             await dbUserUpdate(env, userId, { closed: false });
         } else {
@@ -304,7 +316,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/reset") {
+    if (baseCmd === "/reset") {
         if (hasD1(env)) {
             await dbSetVerifyState(env, userId, null);
         } else {
@@ -314,7 +326,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/trust") {
+    if (baseCmd === "/trust") {
         if (hasD1(env)) {
             await dbSetVerifyState(env, userId, "trusted");
         } else {
@@ -325,7 +337,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/ban") {
+    if (baseCmd === "/ban") {
         if (hasD1(env)) {
             await dbSetBanned(env, userId, true);
         } else {
@@ -335,7 +347,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/unban") {
+    if (baseCmd === "/unban") {
         if (hasD1(env)) {
             await dbSetBanned(env, userId, false);
         } else {
@@ -345,7 +357,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         return;
     }
 
-    if (text === "/info") {
+    if (baseCmd === "/info") {
         const userRec = hasD1(env)
             ? await dbUserGet(env, userId)
             : await safeGetJSON(env, `user:${userId}`, null);

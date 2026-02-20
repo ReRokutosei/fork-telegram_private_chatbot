@@ -64,7 +64,7 @@ export async function probeForumThread(env, expectedThreadId, { userId, reason, 
         const res = await tgCall(env, 'sendMessage', {
             chat_id: env.SUPERGROUP_ID,
             message_thread_id: expectedThreadId,
-            text: '🔎' // 在tg发送符号作为探测，该符号会自动加入动效，后续应改为使用纯文本
+            text: 'probe'
         });
 
         const actualThreadId = res.result?.message_thread_id;
