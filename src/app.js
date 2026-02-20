@@ -22,7 +22,7 @@ import { handleEditedMessageImpl } from './services/edit-sync.js';
 import { handleAdminReplyImpl } from './services/admin-reply.js';
 import { handlePrivateMessageImpl, forwardToTopicImpl } from './services/message-flow.js';
 import { safeGetJSON, getAllKeys, putWithMetadata, deleteBulk } from './adapters/storage-kv.js';
-import { hasD1, dbUserGet, dbUserUpdate, dbGetVerifyState, dbSetVerifyState, dbIsBanned, dbSetBanned, dbThreadGetUserId, dbThreadPut, dbThreadDelete, dbMessageMapPut, dbMessageMapGet, dbListUsers, dbKeywordListWithId, dbKeywordAdd, dbKeywordDelete, dbKeywordDeleteById } from './adapters/storage-d1.js';
+import { hasD1, dbUserGet, dbUserUpdate, dbGetVerifyState, dbSetVerifyState, dbIsBanned, dbSetBanned, dbThreadGetUserId, dbThreadPut, dbThreadDelete, dbMessageMapPut, dbMessageMapGet, dbMessageMapCleanupExpired, dbListUsers, dbKeywordListWithId, dbKeywordAdd, dbKeywordDelete, dbKeywordDeleteById } from './adapters/storage-d1.js';
 import { createWebhookFetchHandler } from './handlers/webhook.js';
 
 // ============================================================================
@@ -152,6 +152,7 @@ const fetchHandler = createWebhookFetchHandler({
     Logger,
     tgCall,
     flushExpiredMediaGroups,
+    cleanupExpiredMessageMaps,
     handleEditedMessage,
     handleCallbackQuery,
     handlePrivateMessage,
@@ -384,6 +385,10 @@ async function handleMediaGroup(msg, env, ctx, { direction, targetChat, threadId
  */
 async function flushExpiredMediaGroups(env, now) {
     return flushExpiredMediaGroupsImpl({ env, now, getAllKeys, safeGetJSON, Logger });
+}
+
+async function cleanupExpiredMessageMaps(env) {
+    return dbMessageMapCleanupExpired(env);
 }
 
 /**

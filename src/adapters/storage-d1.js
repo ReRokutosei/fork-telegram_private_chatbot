@@ -236,6 +236,20 @@ export async function dbMessageMapGet(env, sourceChatId, sourceMsgId) {
     };
 }
 
+export async function dbMessageMapCleanupExpired(env, maxAgeMs = CONFIG.MESSAGE_MAP_TTL_SECONDS * 1000) {
+    if (!hasD1(env)) return 0;
+    const cutoff = Date.now() - Number(maxAgeMs || 0);
+    let changes = 0;
+    await runD1Write(env, 'message_map_cleanup', async () => {
+        const result = await env.TG_BOT_DB
+            .prepare('DELETE FROM messages WHERE created_at < ?')
+            .bind(cutoff)
+            .run();
+        changes = Number(result?.meta?.changes ?? result?.changes ?? 0);
+    });
+    return changes;
+}
+
 export async function dbCount(env, whereSql = '', params = []) {
     if (!hasD1(env)) return 0;
     const sql = `SELECT COUNT(*) AS count FROM users ${whereSql}`;

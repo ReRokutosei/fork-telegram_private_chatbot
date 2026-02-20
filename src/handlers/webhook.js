@@ -2,12 +2,36 @@ export function createWebhookFetchHandler({
     Logger,
     tgCall,
     flushExpiredMediaGroups,
+    cleanupExpiredMessageMaps,
     handleEditedMessage,
     handleCallbackQuery,
     handlePrivateMessage,
     updateThreadStatus,
     handleAdminReply
 }) {
+    const CLEANUP_INTERVAL_MS = 60 * 60 * 1000;
+    const CLEANUP_THROTTLE_KEY = 'sys:message_map_cleanup:last';
+
+    async function runPeriodicMessageMapCleanup(env, now) {
+        if (!cleanupExpiredMessageMaps) return;
+        try {
+            const lastRunRaw = await env.TOPIC_MAP.get(CLEANUP_THROTTLE_KEY);
+            const lastRun = Number(lastRunRaw || 0);
+            if (lastRun && (now - lastRun) < CLEANUP_INTERVAL_MS) return;
+
+            await env.TOPIC_MAP.put(CLEANUP_THROTTLE_KEY, String(now), {
+                expirationTtl: Math.ceil((CLEANUP_INTERVAL_MS * 2) / 1000)
+            });
+
+            const cleaned = await cleanupExpiredMessageMaps(env);
+            if (cleaned > 0) {
+                Logger.info('message_map_cleanup_done', { cleaned });
+            }
+        } catch (e) {
+            Logger.warn('message_map_cleanup_failed', { error: String(e?.message || e) });
+        }
+    }
+
     return async function fetch(request, env, ctx) {
         if (!env.TOPIC_MAP) return new Response("Error: KV 'TOPIC_MAP' not bound.");
         if (!env.TG_BOT_DB) return new Response("Error: D1 'TG_BOT_DB' not bound.");
@@ -57,7 +81,9 @@ export function createWebhookFetchHandler({
         const msg = update.message;
         if (!msg) return new Response('OK');
 
-        ctx.waitUntil(flushExpiredMediaGroups(normalizedEnv, Date.now()));
+        const now = Date.now();
+        ctx.waitUntil(flushExpiredMediaGroups(normalizedEnv, now));
+        ctx.waitUntil(runPeriodicMessageMapCleanup(normalizedEnv, now));
 
         if (msg.chat && msg.chat.type === 'private') {
             try {
