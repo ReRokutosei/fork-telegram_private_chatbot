@@ -6,23 +6,38 @@ compatibility_date = "2024-11-30"
 # Durable Object 配置
 # ============================================================================
 
-# Durable Object 类迁移配置
 # 必须定义迁移来注册 DO 类，否则 CF 面板无法识别
 [[migrations]]
 tag = "v1"
 new_sqlite_classes = ["RateLimitDO"]
 
 # ============================================================================
-# 环境配置
+# 资源绑定
 # ============================================================================
 
-# 注意：KV 命名空间 ID 每个用户都不一样，
-# 所以不能写死在这里。用户需要在 Cloudflare 后台手动绑定。
+# 说明：
+# 1) 绑定定义在顶层，确保每次部署自动生效，不会因重新部署而丢失
+# 2) 占位符 REPLACE_WITH_* 由 CF 构建命令在部署前自动替换
+#    真实 ID 存储在 CF 面板的加密构建环境变量中，不会暴露在仓库
 
-[env.production]
-# Durable Object 绑定配置（在 CF 面板中手动添加）
-# [[durable_objects.bindings]]
-# name = "RATE_LIMIT_DO"
-# class_name = "RateLimitDO"
-# script_name = "terminal-aide-0017"
+# -----------------------------
+# D1 数据库绑定（变量名：TG_BOT_DB）
+# -----------------------------
+[[d1_databases]]
+binding = "TG_BOT_DB"
+database_name = "tg-bot-db"
+database_id = "REPLACE_WITH_D1_DATABASE_ID"
 
+# -----------------------------
+# KV 命名空间绑定（变量名：TOPIC_MAP）
+# -----------------------------
+[[kv_namespaces]]
+binding = "TOPIC_MAP"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# -----------------------------
+# Durable Object 绑定（变量名：RATE_LIMIT_DO）
+# -----------------------------
+[[durable_objects.bindings]]
+name = "RATE_LIMIT_DO"
+class_name = "RateLimitDO"
