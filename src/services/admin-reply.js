@@ -321,7 +321,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.put(`banned:${userId}`, "1");
         }
-        await sendInThread(`🚫 **用户已封禁**\nUID: \`${userId}\``, "Markdown");
+        await sendInThread(`🚫 **用户已封禁**\nUID: [${userId}](tg://user?id=${userId})`, "Markdown");
         return;
     }
 
@@ -331,7 +331,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.delete(`banned:${userId}`);
         }
-        await sendInThread(`✅ **用户已解封**\nUID: \`${userId}\``, "Markdown");
+        await sendInThread(`✅ **用户已解封**\nUID: [${userId}](tg://user?id=${userId})`, "Markdown");
         return;
     }
 
@@ -347,7 +347,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
             : await env.TOPIC_MAP.get(`banned:${userId}`);
 
         const topicId = userRec?.thread_id || threadId || "未知";
-        const info = `👤 **用户信息**\nUID: \`${userId}\`\nTopic ID: \`${topicId}\`\n话题标题: ${userRec?.title || "未知"}\n验证状态: ${verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证'}\n封禁状态: ${banStatus ? '🚫 已封禁' : '✅ 正常'}\nLink: [点击私聊](tg://user?id=${userId})`;
+        const info = `👤 **用户信息**\nUID: [${userId}](tg://user?id=${userId})\nTopic ID: \`${topicId}\`\n话题标题: ${userRec?.title || "未知"}\n验证状态: ${verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证'}\n封禁状态: ${banStatus ? '🚫 已封禁' : '✅ 正常'}`;
         await sendInThread(info, "Markdown");
         return;
     }

@@ -213,7 +213,7 @@ export async function handleCleanupCommandImpl({
             reportText += `🗑️ **已清理的用户** (话题已删除):
 `;
             for (const user of cleanedUsers.slice(0, CONFIG.MAX_CLEANUP_DISPLAY)) {
-                reportText += `- UID: \`${user.userId}\` | 话题: ${user.title}
+                reportText += `- UID: [${user.userId}](tg://user?id=${user.userId}) | 话题: ${user.title}
 `;
             }
             if (cleanedUsers.length > CONFIG.MAX_CLEANUP_DISPLAY) {

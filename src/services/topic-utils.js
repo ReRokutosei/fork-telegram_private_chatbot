@@ -37,13 +37,11 @@ export async function sendWelcomeCard(env, threadId, userId, userFrom) {
 
     const cardText = `👤 <b>新用户接入</b>
 ` +
-                    `ID: <code>${userId}</code>
+                    `ID: <a href="tg://user?id=${userId}">${userId}</a>
 ` +
                     `名字: <a href="tg://user?id=${userId}">${fullName}</a>
 ` +
-                    `用户名: ${userNameStr}
-` +
-                    `#id${userId}`;
+                    `用户名: ${userNameStr};
 
     try {
         await tgCall(env, 'sendMessage', {
