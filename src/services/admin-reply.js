@@ -9,6 +9,59 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     // 群组命令可能为 /cmd@BotName，统一归一化到 /cmd
     const baseCmd = rawCmd.split("@")[0].toLowerCase();
     const args = parts.slice(1);
+    const sendInThread = async (text, parseMode = null) => {
+        const payload = { chat_id: env.SUPERGROUP_ID, text };
+        if (threadId) payload.message_thread_id = threadId;
+        if (parseMode) payload.parse_mode = parseMode;
+        await tgCall(env, "sendMessage", payload);
+    };
+
+    const resolveTargetUserId = async () => {
+        if (args[0] && /^\d+$/.test(args[0])) {
+            return Number(args[0]);
+        }
+        if (!threadId) return null;
+
+        let resolvedUserId = null;
+        if (hasD1(env)) {
+            const mappedUser = await dbThreadGetUserId(env, threadId);
+            if (mappedUser) {
+                resolvedUserId = Number(mappedUser);
+            } else {
+                const result = await env.TG_BOT_DB
+                    .prepare("SELECT user_id FROM users WHERE thread_id = ?")
+                    .bind(String(threadId))
+                    .first();
+                if (result?.user_id) {
+                    resolvedUserId = Number(result.user_id);
+                    await dbThreadPut(env, threadId, resolvedUserId);
+                }
+            }
+        } else {
+            const mappedUser = await env.TOPIC_MAP.get(`thread:${threadId}`);
+            if (mappedUser) {
+                resolvedUserId = Number(mappedUser);
+            } else {
+                const allKeys = await getAllKeys(env, "user:");
+                for (const { name } of allKeys) {
+                    const rec = await safeGetJSON(env, name, null);
+                    if (rec && Number(rec.thread_id) === Number(threadId)) {
+                        resolvedUserId = Number(name.slice(5));
+                        break;
+                    }
+                }
+            }
+        }
+        return resolvedUserId;
+    };
+
+    const sendTargetUserRequiredFeedback = async () => {
+        const commandHint = [
+            "❌ 无法识别目标用户。",
+            "请在用户话题内执行该命令，或为 `/ban` `/unban` `/info` 指定用户 ID（如 `/ban 123456`）。"
+        ].join("\n");
+        await sendInThread(commandHint, "Markdown");
+    };
 
     // 权限检查
     if (!senderId || !(await isAdminUser(env, senderId))) {
@@ -44,17 +97,13 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     if (baseCmd === "/kw" && (args[0] || "").toLowerCase() === "list") {
         if (!hasD1(env)) {
             const warnText = "⚠️ 关键词功能需要绑定 D1 数据库。";
-            const payload = { chat_id: env.SUPERGROUP_ID, text: warnText, parse_mode: "Markdown" };
-            if (threadId) payload.message_thread_id = threadId;
-            await tgCall(env, "sendMessage", payload);
+            await sendInThread(warnText, "Markdown");
             return;
         }
 
         const list = await dbKeywordListWithId(env);
         if (!list.length) {
-            const payload = { chat_id: env.SUPERGROUP_ID, text: "当前暂无关键词。" };
-            if (threadId) payload.message_thread_id = threadId;
-            await tgCall(env, "sendMessage", payload);
+            await sendInThread("当前暂无关键词。");
             return;
         }
 
@@ -63,98 +112,23 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         const maxLen = 3800;
         let buffer = `${header}\n\n`;
         for (const line of items) {
-            if ((buffer.length + line.length + 1) > maxLen) {
-                const payload = { chat_id: env.SUPERGROUP_ID, text: buffer.trimEnd() };
-                if (threadId) payload.message_thread_id = threadId;
-                await tgCall(env, "sendMessage", payload);
+                if ((buffer.length + line.length + 1) > maxLen) {
+                await sendInThread(buffer.trimEnd());
                 buffer = "";
             }
             buffer += (buffer ? "\n" : "") + line;
         }
         if (buffer.trim()) {
-            const payload = { chat_id: env.SUPERGROUP_ID, text: buffer.trimEnd() };
-            if (threadId) payload.message_thread_id = threadId;
-            await tgCall(env, "sendMessage", payload);
+            await sendInThread(buffer.trimEnd());
         }
         return;
     }
 
-    if (baseCmd === "/ban" && args[0] && /^\d+$/.test(args[0])) {
-        const targetUserId = Number(args[0]);
-        if (hasD1(env)) {
-            await dbSetBanned(env, targetUserId, true);
-        } else {
-            await env.TOPIC_MAP.put(`banned:${targetUserId}`, "1");
-        }
-        const payload = {
-            chat_id: env.SUPERGROUP_ID,
-            text: `🚫 **用户已封禁**\nUID: \`${targetUserId}\``,
-            parse_mode: "Markdown"
-        };
-        if (threadId) payload.message_thread_id = threadId;
-        await tgCall(env, "sendMessage", payload);
-        return;
-    }
-
-    if (baseCmd === "/unban" && args[0] && /^\d+$/.test(args[0])) {
-        const targetUserId = Number(args[0]);
-        if (hasD1(env)) {
-            await dbSetBanned(env, targetUserId, false);
-        } else {
-            await env.TOPIC_MAP.delete(`banned:${targetUserId}`);
-        }
-        const payload = {
-            chat_id: env.SUPERGROUP_ID,
-            text: `✅ **用户已解封**\nUID: \`${targetUserId}\``,
-            parse_mode: "Markdown"
-        };
-        if (threadId) payload.message_thread_id = threadId;
-        await tgCall(env, "sendMessage", payload);
-        return;
-    }
-
-    // 查找用户 ID
-    let userId = null;
-    if (hasD1(env)) {
-        const mappedUser = await dbThreadGetUserId(env, threadId);
-        if (mappedUser) {
-            userId = Number(mappedUser);
-        } else {
-            const result = await env.TG_BOT_DB
-                .prepare("SELECT user_id FROM users WHERE thread_id = ?")
-                .bind(String(threadId))
-                .first();
-            if (result?.user_id) {
-                userId = Number(result.user_id);
-                await dbThreadPut(env, threadId, userId);
-            }
-        }
-    } else {
-        const mappedUser = await env.TOPIC_MAP.get(`thread:${threadId}`);
-        if (mappedUser) {
-            userId = Number(mappedUser);
-        } else {
-            const allKeys = await getAllKeys(env, "user:");
-            for (const { name } of allKeys) {
-                const rec = await safeGetJSON(env, name, null);
-                if (rec && Number(rec.thread_id) === Number(threadId)) {
-                    userId = Number(name.slice(5));
-                    break;
-                }
-            }
-        }
-    }
-
-    if (!userId) {
-        if (baseCmd === "/ban" || baseCmd === "/unban") {
-            const payload = {
-                chat_id: env.SUPERGROUP_ID,
-                text: "❌ 无法识别目标用户。\n请在用户话题内执行，或使用 `/ban <id>` / `/unban <id>`。",
-                parse_mode: "Markdown"
-            };
-            if (threadId) payload.message_thread_id = threadId;
-            await tgCall(env, "sendMessage", payload);
-        }
+    const userId = await resolveTargetUserId();
+    const needsUserContext = new Set(["/ban", "/unban", "/info", "/close", "/open", "/reset", "/trust"]);
+    const isKwThreadOnly = baseCmd === "/kw" && (args[0] || "").toLowerCase() !== "list";
+    if (!userId && (needsUserContext.has(baseCmd) || isKwThreadOnly)) {
+        await sendTargetUserRequiredFeedback();
         return;
     }
 
@@ -295,8 +269,10 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
                 await env.TOPIC_MAP.put(key, JSON.stringify(rec));
             }
         }
-        await tgCall(env, "closeForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🚫 **对话已强制关闭**", parse_mode: "Markdown" });
+        if (threadId) {
+            await tgCall(env, "closeForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
+        }
+        await sendInThread("🚫 **对话已强制关闭**", "Markdown");
         return;
     }
 
@@ -311,8 +287,10 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
                 await env.TOPIC_MAP.put(key, JSON.stringify(rec));
             }
         }
-        await tgCall(env, "reopenForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "✅ **对话已恢复**", parse_mode: "Markdown" });
+        if (threadId) {
+            await tgCall(env, "reopenForumTopic", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId });
+        }
+        await sendInThread("✅ **对话已恢复**", "Markdown");
         return;
     }
 
@@ -322,7 +300,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.delete(`verified:${userId}`);
         }
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🔄 **验证重置**", parse_mode: "Markdown" });
+        await sendInThread("🔄 **验证重置**", "Markdown");
         return;
     }
 
@@ -333,7 +311,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
             await env.TOPIC_MAP.put(`verified:${userId}`, "trusted");
         }
         await env.TOPIC_MAP.delete(`needs_verify:${userId}`);
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🌟 **已设置永久信任**", parse_mode: "Markdown" });
+        await sendInThread("🌟 **已设置永久信任**", "Markdown");
         return;
     }
 
@@ -343,7 +321,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.put(`banned:${userId}`, "1");
         }
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "🚫 **用户已封禁**", parse_mode: "Markdown" });
+        await sendInThread(`🚫 **用户已封禁**\nUID: \`${userId}\``, "Markdown");
         return;
     }
 
@@ -353,7 +331,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.delete(`banned:${userId}`);
         }
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "✅ **用户已解封**", parse_mode: "Markdown" });
+        await sendInThread(`✅ **用户已解封**\nUID: \`${userId}\``, "Markdown");
         return;
     }
 
@@ -368,8 +346,9 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
             ? await dbIsBanned(env, userId)
             : await env.TOPIC_MAP.get(`banned:${userId}`);
 
-        const info = `👤 **用户信息**\nUID: \`${userId}\`\nTopic ID: \`${threadId}\`\n话题标题: ${userRec?.title || "未知"}\n验证状态: ${verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证'}\n封禁状态: ${banStatus ? '🚫 已封禁' : '✅ 正常'}\nLink: [点击私聊](tg://user?id=${userId})`;
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: info, parse_mode: "Markdown" });
+        const topicId = userRec?.thread_id || threadId || "未知";
+        const info = `👤 **用户信息**\nUID: \`${userId}\`\nTopic ID: \`${topicId}\`\n话题标题: ${userRec?.title || "未知"}\n验证状态: ${verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证'}\n封禁状态: ${banStatus ? '🚫 已封禁' : '✅ 正常'}\nLink: [点击私聊](tg://user?id=${userId})`;
+        await sendInThread(info, "Markdown");
         return;
     }
 
