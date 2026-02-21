@@ -12,6 +12,11 @@ export async function handleCleanupCommandImpl({
     tgCall,
     withMessageThreadId
 }) {
+    const escapeHtml = (value) => String(value ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;');
+
     const lockKey = 'cleanup:lock';
     const locked = await env.TOPIC_MAP.get(lockKey);
     if (locked) {
@@ -196,33 +201,21 @@ export async function handleCleanupCommandImpl({
             }
         }
 
-        let reportText = `✅ **清理完成**
-
-`;
-        reportText += `📊 **统计信息**
-`;
-        reportText += `- 扫描用户数: ${scannedCount}
-`;
-        reportText += `- 已清理用户数: ${cleanedCount}
-`;
-        reportText += `- 错误数: ${errorCount}
-
-`;
+        let reportText = `✅ <b>清理完成</b>\n\n`;
+        reportText += `📊 <b>统计信息</b>\n`;
+        reportText += `- 扫描用户数: ${scannedCount}\n`;
+        reportText += `- 已清理用户数: ${cleanedCount}\n`;
+        reportText += `- 错误数: ${errorCount}\n\n`;
 
         if (cleanedCount > 0) {
-            reportText += `🗑️ **已清理的用户** (话题已删除):
-`;
+            reportText += `🗑️ <b>已清理的用户</b> (话题已删除):\n`;
             for (const user of cleanedUsers.slice(0, CONFIG.MAX_CLEANUP_DISPLAY)) {
-                reportText += `- UID: [${user.userId}](tg://user?id=${user.userId}) | 话题: ${user.title}
-`;
+                reportText += `- UID: <a href="tg://user?id=${user.userId}">${user.userId}</a> | 话题: ${escapeHtml(user.title)}\n`;
             }
             if (cleanedUsers.length > CONFIG.MAX_CLEANUP_DISPLAY) {
-                reportText += `
-...(还有 ${cleanedUsers.length - CONFIG.MAX_CLEANUP_DISPLAY} 个用户)
-`;
+                reportText += `\n...(还有 ${cleanedUsers.length - CONFIG.MAX_CLEANUP_DISPLAY} 个用户)\n`;
             }
-            reportText += `
-💡 这些用户下次发消息时将重新进行人机验证并创建新话题。`;
+            reportText += `\n💡 这些用户下次发消息时将重新进行人机验证并创建新话题。`;
         } else {
             reportText += `✨ 没有发现需要清理的用户记录。`;
         }
@@ -236,17 +229,15 @@ export async function handleCleanupCommandImpl({
         await tgCall(env, 'sendMessage', withMessageThreadId({
             chat_id: env.SUPERGROUP_ID,
             text: reportText,
-            parse_mode: 'Markdown'
+            parse_mode: 'HTML'
         }, threadId));
 
     } catch (e) {
         Logger.error('cleanup_failed', e, { threadId });
         await tgCall(env, 'sendMessage', withMessageThreadId({
             chat_id: env.SUPERGROUP_ID,
-            text: `❌ **清理过程出错**
-
-错误信息: \`${e.message}\``,
-            parse_mode: 'Markdown'
+            text: `❌ <b>清理过程出错</b>\n\n错误信息: <code>${escapeHtml(e.message)}</code>`,
+            parse_mode: 'HTML'
         }, threadId));
     } finally {
         await env.TOPIC_MAP.delete(lockKey);
