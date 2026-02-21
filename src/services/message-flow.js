@@ -1,6 +1,26 @@
 export async function handlePrivateMessageImpl(msg, env, ctx, deps) {
-    const { forwardToTopic } = deps;
-    await forwardToTopic(msg, env, ctx);
+    const { forwardToTopic, withUserLock, tgCall, Logger } = deps;
+    const userId = msg.chat?.id;
+    if (!userId || !withUserLock) {
+        await forwardToTopic(msg, env, ctx);
+        return;
+    }
+
+    try {
+        await withUserLock(env, userId, async () => {
+            await forwardToTopic(msg, env, ctx);
+        });
+    } catch (e) {
+        if (e?.code === 'USER_LOCK_TIMEOUT' || e?.code === 'USER_LOCK_LOST') {
+            await tgCall(env, "sendMessage", {
+                chat_id: userId,
+                text: "⏳ 当前请求处理中，请稍后重试。"
+            });
+            Logger.warn('user_lock_blocked', { userId, code: e.code, error: e.message });
+            return;
+        }
+        throw e;
+    }
 }
 
 export async function forwardToTopicImpl(msg, env, ctx, deps) {

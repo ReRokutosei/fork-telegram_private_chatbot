@@ -47,6 +47,17 @@ export class RateLimitDO extends DurableObject {
                 /* expires_at 索引用于加速按过期时间的清理与统计查询 */
                 CREATE INDEX IF NOT EXISTS idx_expires_at
                 ON rate_limits(expires_at);
+
+                CREATE TABLE IF NOT EXISTS user_locks (
+                    lock_key TEXT PRIMARY KEY,
+                    owner_token TEXT NOT NULL,
+                    expires_at INTEGER NOT NULL,
+                    created_at INTEGER NOT NULL,
+                    updated_at INTEGER NOT NULL
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_user_locks_expires_at
+                ON user_locks(expires_at);
             `);
         });
 
@@ -61,6 +72,104 @@ export class RateLimitDO extends DurableObject {
          * - Map<key, { count: number, expiresAt: number }>
          */
         this.cache = new Map();
+    }
+
+    /**
+     * RPC：获取用户锁。
+     *
+     * 说明：
+     * - 同一 DO 实例对应单个 userId，lock_key 用于区分该用户下不同业务锁。
+     * - 返回 acquired=false 时，调用方应等待 retryAfterMs 后重试。
+     */
+    async acquireLock(lockKey, ownerToken, ttlMs = 15000) {
+        if (!lockKey || !ownerToken) {
+            throw new Error('Missing parameters: lockKey, ownerToken');
+        }
+
+        const now = Date.now();
+        const ttl = Math.max(1000, Number(ttlMs || 15000));
+        const nextExpiresAt = now + ttl;
+
+        const row = this.ctx.storage.sql.exec(
+            `SELECT owner_token, expires_at FROM user_locks WHERE lock_key = ?`,
+            lockKey
+        ).one();
+
+        if (row && row.expires_at > now && row.owner_token !== ownerToken) {
+            return {
+                acquired: false,
+                retryAfterMs: Math.max(50, row.expires_at - now)
+            };
+        }
+
+        this.ctx.storage.sql.exec(
+            `INSERT INTO user_locks (lock_key, owner_token, expires_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?)
+             ON CONFLICT(lock_key) DO UPDATE SET
+             owner_token = excluded.owner_token,
+             expires_at = excluded.expires_at,
+             updated_at = excluded.updated_at`,
+            lockKey, ownerToken, nextExpiresAt, now, now
+        );
+
+        return {
+            acquired: true,
+            ownerToken,
+            expiresAt: nextExpiresAt
+        };
+    }
+
+    /**
+     * RPC：释放用户锁。
+     *
+     * 说明：
+     * - 必须携带 ownerToken，避免误释放其他请求持有的锁。
+     */
+    async releaseLock(lockKey, ownerToken) {
+        if (!lockKey || !ownerToken) {
+            throw new Error('Missing parameters: lockKey, ownerToken');
+        }
+
+        const result = this.ctx.storage.sql.exec(
+            `DELETE FROM user_locks WHERE lock_key = ? AND owner_token = ?`,
+            lockKey, ownerToken
+        );
+
+        return { released: (result.meta.changes || 0) > 0 };
+    }
+
+    /**
+     * RPC：续期用户锁。
+     *
+     * 说明：
+     * - 仅锁持有者可续期。
+     * - 锁已过期时续期失败，调用方应按“锁丢失”处理。
+     */
+    async renewLock(lockKey, ownerToken, ttlMs = 15000) {
+        if (!lockKey || !ownerToken) {
+            throw new Error('Missing parameters: lockKey, ownerToken');
+        }
+
+        const now = Date.now();
+        const ttl = Math.max(1000, Number(ttlMs || 15000));
+        const nextExpiresAt = now + ttl;
+        const row = this.ctx.storage.sql.exec(
+            `SELECT owner_token, expires_at FROM user_locks WHERE lock_key = ?`,
+            lockKey
+        ).one();
+
+        if (!row || row.owner_token !== ownerToken || row.expires_at <= now) {
+            return { renewed: false };
+        }
+
+        this.ctx.storage.sql.exec(
+            `UPDATE user_locks
+             SET expires_at = ?, updated_at = ?
+             WHERE lock_key = ? AND owner_token = ?`,
+            nextExpiresAt, now, lockKey, ownerToken
+        );
+
+        return { renewed: true, expiresAt: nextExpiresAt };
     }
 
     /**
@@ -198,8 +307,12 @@ export class RateLimitDO extends DurableObject {
      */
     async cleanupExpired() {
         const now = Date.now();
-        const result = this.ctx.storage.sql.exec(
+        const rateLimitResult = this.ctx.storage.sql.exec(
             `DELETE FROM rate_limits WHERE expires_at < ?`,
+            now
+        );
+        const lockResult = this.ctx.storage.sql.exec(
+            `DELETE FROM user_locks WHERE expires_at < ?`,
             now
         );
 
@@ -210,7 +323,10 @@ export class RateLimitDO extends DurableObject {
             }
         }
 
-        return { deleted: result.meta.changes };
+        return {
+            deletedRateLimits: rateLimitResult.meta.changes,
+            deletedLocks: lockResult.meta.changes
+        };
     }
 
     /**
@@ -230,10 +346,15 @@ export class RateLimitDO extends DurableObject {
             `SELECT COUNT(*) as count FROM rate_limits WHERE expires_at > ?`,
             Date.now()
         ).one();
+        const activeLocks = this.ctx.storage.sql.exec(
+            `SELECT COUNT(*) as count FROM user_locks WHERE expires_at > ?`,
+            Date.now()
+        ).one();
 
         return {
             totalRecords: total?.count || 0,
             activeRecords: active?.count || 0,
+            activeLocks: activeLocks?.count || 0,
             cachedItems: this.cache.size
         };
     }

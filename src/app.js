@@ -21,6 +21,7 @@ import { getOrCreateUserTopicRecImpl, resetUserVerificationAndRequireReverifyImp
 import { handleEditedMessageImpl } from './services/edit-sync.js';
 import { handleAdminReplyImpl } from './services/admin-reply.js';
 import { handlePrivateMessageImpl, forwardToTopicImpl } from './services/message-flow.js';
+import { withUserLock, UserLockTimeoutError, UserLockLostError } from './services/user-lock.js';
 import { safeGetJSON, getAllKeys, putWithMetadata, deleteBulk } from './adapters/storage-kv.js';
 import { hasD1, dbUserGet, dbUserUpdate, dbGetVerifyState, dbSetVerifyState, dbIsBanned, dbSetBanned, dbThreadGetUserId, dbThreadPut, dbThreadDelete, dbMessageMapPut, dbMessageMapGet, dbMessageMapCleanupExpired, dbListUsers, dbKeywordListWithId, dbKeywordAdd, dbKeywordDelete, dbKeywordDeleteById } from './adapters/storage-d1.js';
 import { createWebhookFetchHandler } from './handlers/webhook.js';
@@ -173,8 +174,29 @@ export default {
  */
 async function handlePrivateMessage(msg, env, ctx) {
     return handlePrivateMessageImpl(msg, env, ctx, {
-        forwardToTopic
+        forwardToTopic,
+        withUserLock: runWithUserLock,
+        tgCall,
+        Logger
     });
+}
+
+async function runWithUserLock(env, userId, fn) {
+    try {
+        return await withUserLock(env, userId, fn, {
+            ttlMs: CONFIG.USER_LOCK_TTL_MS,
+            acquireTimeoutMs: CONFIG.USER_LOCK_ACQUIRE_TIMEOUT_MS,
+            retryIntervalMs: CONFIG.USER_LOCK_RETRY_INTERVAL_MS,
+            heartbeatIntervalMs: CONFIG.USER_LOCK_HEARTBEAT_INTERVAL_MS,
+            logger: Logger
+        });
+    } catch (e) {
+        if (e instanceof UserLockTimeoutError || e instanceof UserLockLostError) {
+            throw e;
+        }
+        Logger.warn('user_lock_failed_fallback_to_unlocked', { userId, error: e.message });
+        return await fn();
+    }
 }
 
 /**
@@ -323,7 +345,9 @@ async function createTopic(from, key, env, userId) {
         dbUserUpdate,
         dbThreadPut,
         putWithMetadata,
-        buildTopicTitle
+        buildTopicTitle,
+        probeForumThread,
+        Logger
     });
 }
 

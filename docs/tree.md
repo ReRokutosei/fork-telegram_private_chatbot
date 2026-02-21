@@ -39,6 +39,7 @@
   - `keywords.js`：关键词规则校验与匹配。
   - `admin.js`：管理员身份判定与缓存。
   - `rate-limit.js`：限流调用封装（DO 优先，KV 降级）。
+  - `user-lock.js`：用户级并发锁封装（DO 分布式锁优先，含心跳续期，KV 兜底）。
   - `queue.js`：失败消息队列（入队/处理）。
   - `stats.js`：统计、导出、活跃度数据读取。
 
@@ -63,7 +64,7 @@
 ### `src/do/`
 - Durable Object 实现。
 - 当前文件：
-  - `rate-limit-do.js`：限流 Durable Object。
+  - `rate-limit-do.js`：限流与用户锁 Durable Object。
 
 ## 依赖方向约定
 
