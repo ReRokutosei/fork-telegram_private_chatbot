@@ -41,7 +41,7 @@ export async function sendWelcomeCard(env, threadId, userId, userFrom) {
 ` +
                     `名字: <a href="tg://user?id=${userId}">${fullName}</a>
 ` +
-                    `用户名: ${userNameStr};
+                    `用户名: ${userNameStr}`;
 
     try {
         await tgCall(env, 'sendMessage', {

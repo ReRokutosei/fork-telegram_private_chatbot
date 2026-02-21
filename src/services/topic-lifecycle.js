@@ -126,38 +126,118 @@ export async function createTopicImpl({
     dbUserUpdate,
     dbThreadPut,
     putWithMetadata,
-    buildTopicTitle
+    buildTopicTitle,
+    probeForumThread,
+    Logger
 }) {
+    const normalizeDesc = (desc) => (desc || '').toString().toLowerCase();
+    const isCreateNonRetryable = (desc) => {
+        const text = normalizeDesc(desc);
+        return text.includes('not enough rights') ||
+               text.includes('chat not found') ||
+               text.includes('forbidden') ||
+               text.includes('bot was kicked') ||
+               text.includes('have no rights');
+    };
+
+    const isProbeNonRetryable = (status, desc) => {
+        if (status === 'probe_invalid') return true;
+        return isCreateNonRetryable(desc);
+    };
+
     const title = buildTopicTitle(from);
     if (!env.SUPERGROUP_ID.toString().startsWith('-100')) throw new Error('SUPERGROUP_ID必须以-100开头');
-    const res = await tgCall(env, 'createForumTopic', { chat_id: env.SUPERGROUP_ID, name: title });
-    if (!res.ok) throw new Error(`创建话题失败: ${res.description}`);
+    const retries = Math.max(0, Number(CONFIG.TOPIC_CREATE_VERIFY_MAX_RETRIES || 0));
+    const baseBackoffMs = Math.max(100, Number(CONFIG.TOPIC_CREATE_VERIFY_BACKOFF_MS || 350));
+    let lastError = null;
 
-    const rec = { thread_id: res.result.message_thread_id, title, closed: false };
-
-    if (hasD1(env)) {
-        await dbUserUpdate(env, userId, {
-            thread_id: rec.thread_id,
-            title: rec.title,
-            closed: false
-        });
-        if (userId) {
-            await dbThreadPut(env, rec.thread_id, userId);
-        }
-    } else {
-        await putWithMetadata(env, key, rec, {
-            expirationTtl: null,
-            metadata: {
-                userId: String(userId),
-                threadId: res.result.message_thread_id
+    for (let attempt = 0; attempt <= retries; attempt++) {
+        const createRes = await tgCall(env, 'createForumTopic', { chat_id: env.SUPERGROUP_ID, name: title });
+        if (!createRes.ok) {
+            if (isCreateNonRetryable(createRes.description)) {
+                throw new Error(`创建话题失败（不可重试）: ${createRes.description}`);
             }
-        });
+            lastError = new Error(`创建话题失败: ${createRes.description}`);
+        } else {
+            const threadId = createRes.result?.message_thread_id;
+            if (!threadId) {
+                lastError = new Error('创建话题失败: 未返回有效的话题 ID');
+                if (attempt < retries) {
+                    const waitMs = baseBackoffMs * (attempt + 1);
+                    await new Promise(resolve => setTimeout(resolve, waitMs));
+                    continue;
+                }
+                break;
+            }
+            const probe = await probeForumThread(env, threadId, {
+                userId,
+                reason: 'topic_create_verify',
+                doubleCheckOnMissingThreadId: false
+            });
 
-        if (userId) {
-            await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
+            if (probe.status === 'ok' || probe.status === 'probe_invalid') {
+                const rec = { thread_id: threadId, title, closed: false };
+
+                if (hasD1(env)) {
+                    await dbUserUpdate(env, userId, {
+                        thread_id: rec.thread_id,
+                        title: rec.title,
+                        closed: false
+                    });
+                    if (userId) {
+                        await dbThreadPut(env, rec.thread_id, userId);
+                    }
+                } else {
+                    await putWithMetadata(env, key, rec, {
+                        expirationTtl: null,
+                        metadata: {
+                            userId: String(userId),
+                            threadId: threadId
+                        }
+                    });
+
+                    if (userId) {
+                        await env.TOPIC_MAP.put(`thread:${rec.thread_id}`, String(userId));
+                    }
+                }
+
+                await env.TOPIC_MAP.put(`thread_ok:${rec.thread_id}`, "1", {
+                    expirationTtl: Math.ceil(CONFIG.THREAD_HEALTH_TTL_MS / 1000)
+                });
+                return rec;
+            }
+
+            Logger.warn('topic_create_verify_failed', {
+                userId,
+                attempt: attempt + 1,
+                maxAttempts: retries + 1,
+                threadId,
+                probeStatus: probe.status,
+                probeDescription: probe.description
+            });
+            if (isProbeNonRetryable(probe.status, probe.description)) {
+                throw new Error(`话题可用性验证失败（不可重试）: ${probe.status}`);
+            }
+
+            try {
+                await tgCall(env, 'closeForumTopic', {
+                    chat_id: env.SUPERGROUP_ID,
+                    message_thread_id: threadId
+                });
+            } catch {
+                // 忽略关闭失败
+            }
+
+            lastError = new Error(`话题可用性验证失败: ${probe.status}`);
+        }
+
+        if (attempt < retries) {
+            const waitMs = baseBackoffMs * (attempt + 1);
+            await new Promise(resolve => setTimeout(resolve, waitMs));
         }
     }
-    return rec;
+
+    throw lastError || new Error('创建话题失败: 未知错误');
 }
 
 export async function updateThreadStatusImpl({
