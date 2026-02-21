@@ -12,11 +12,6 @@ export async function handleCleanupCommandImpl({
     tgCall,
     withMessageThreadId
 }) {
-    const escapeHtml = (value) => String(value ?? '')
-        .replace(/&/g, '&amp;')
-        .replace(/</g, '&lt;')
-        .replace(/>/g, '&gt;');
-
     const lockKey = 'cleanup:lock';
     const locked = await env.TOPIC_MAP.get(lockKey);
     if (locked) {
@@ -201,16 +196,17 @@ export async function handleCleanupCommandImpl({
             }
         }
 
-        let reportText = `✅ <b>清理完成</b>\n\n`;
-        reportText += `📊 <b>统计信息</b>\n`;
+        let reportText = `✅ 清理完成\n\n`;
+        reportText += `📊 统计信息\n`;
         reportText += `- 扫描用户数: ${scannedCount}\n`;
         reportText += `- 已清理用户数: ${cleanedCount}\n`;
         reportText += `- 错误数: ${errorCount}\n\n`;
 
         if (cleanedCount > 0) {
-            reportText += `🗑️ <b>已清理的用户</b> (话题已删除):\n`;
+            reportText += `🗑️ 已清理的用户 (话题已删除):\n`;
             for (const user of cleanedUsers.slice(0, CONFIG.MAX_CLEANUP_DISPLAY)) {
-                reportText += `- UID: <a href="tg://user?id=${user.userId}">${user.userId}</a> | 话题: ${escapeHtml(user.title)}\n`;
+                reportText += `- UID: ${user.userId} | 话题: ${user.title}\n`;
+                reportText += `  Link: (tg://user?id=${user.userId})\n`;
             }
             if (cleanedUsers.length > CONFIG.MAX_CLEANUP_DISPLAY) {
                 reportText += `\n...(还有 ${cleanedUsers.length - CONFIG.MAX_CLEANUP_DISPLAY} 个用户)\n`;
@@ -228,16 +224,14 @@ export async function handleCleanupCommandImpl({
 
         await tgCall(env, 'sendMessage', withMessageThreadId({
             chat_id: env.SUPERGROUP_ID,
-            text: reportText,
-            parse_mode: 'HTML'
+            text: reportText
         }, threadId));
 
     } catch (e) {
         Logger.error('cleanup_failed', e, { threadId });
         await tgCall(env, 'sendMessage', withMessageThreadId({
             chat_id: env.SUPERGROUP_ID,
-            text: `❌ <b>清理过程出错</b>\n\n错误信息: <code>${escapeHtml(e.message)}</code>`,
-            parse_mode: 'HTML'
+            text: `❌ 清理过程出错\n\n错误信息: ${e.message}`
         }, threadId));
     } finally {
         await env.TOPIC_MAP.delete(lockKey);

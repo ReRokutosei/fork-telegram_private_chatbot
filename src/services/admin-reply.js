@@ -15,10 +15,6 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         if (parseMode) payload.parse_mode = parseMode;
         await tgCall(env, "sendMessage", payload);
     };
-    const escapeHtml = (value) => String(value ?? "")
-        .replace(/&/g, "&amp;")
-        .replace(/</g, "&lt;")
-        .replace(/>/g, "&gt;");
 
     const resolveTargetUserId = async () => {
         if (args[0] && /^\d+$/.test(args[0])) {
@@ -325,7 +321,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.put(`banned:${userId}`, "1");
         }
-        await sendInThread(`🚫 <b>用户已封禁</b>\nUID: <a href="tg://user?id=${userId}">${userId}</a>`, "HTML");
+        await sendInThread(`🚫 用户已封禁\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
         return;
     }
 
@@ -335,7 +331,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.delete(`banned:${userId}`);
         }
-        await sendInThread(`✅ <b>用户已解封</b>\nUID: <a href="tg://user?id=${userId}">${userId}</a>`, "HTML");
+        await sendInThread(`✅ 用户已解封\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
         return;
     }
 
@@ -350,12 +346,12 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
             ? await dbIsBanned(env, userId)
             : await env.TOPIC_MAP.get(`banned:${userId}`);
 
-        const topicId = escapeHtml(userRec?.thread_id || threadId || "未知");
-        const title = escapeHtml(userRec?.title || "未知");
+        const topicId = userRec?.thread_id || threadId || "未知";
+        const title = userRec?.title || "未知";
         const verifyLabel = verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证';
         const banLabel = banStatus ? '🚫 已封禁' : '✅ 正常';
-        const info = `👤 <b>用户信息</b>\nUID: <a href="tg://user?id=${userId}">${userId}</a>\nTopic ID: <code>${topicId}</code>\n话题标题: ${title}\n验证状态: ${verifyLabel}\n封禁状态: ${banLabel}`;
-        await sendInThread(info, "HTML");
+        const info = `👤 用户信息\nUID: ${userId}\nLink: (tg://user?id=${userId})\nTopic ID: ${topicId}\n话题标题: ${title}\n验证状态: ${verifyLabel}\n封禁状态: ${banLabel}`;
+        await sendInThread(info);
         return;
     }
 
