@@ -2,6 +2,14 @@
 
 > [!TIP]
 > 相对于 [原项目（96ffd6b）](https://github.com/jikssha/telegram_private_chatbot/commit/96ffd6b492694ce68ce0f52d76630b5516425f93)，本 fork **主要变更**：
+>
+> （2026.02.22）：
+> - 架构重构：将单文件 `worker.js` 拆分为 `src/handlers`、`src/services`、`src/adapters`、`src/core`、`src/config`、`src/do` 分层模块；`main.js` 精简为入口装配
+> - 资源与部署 (Important)：资源绑定调整为顶层配置，无需再手动绑定；补充并更新项目结构文档（`docs/tree.md`）
+> - 稳定性增强：引入用户级并发锁；新增“新建话题后二次可用性验证 + 重试”；增加消息映射过期清理与定时触发
+> - 管理命令完善：统一目标用户解析与失败反馈，支持 `/cmd@BotName`；增强 `/ban` `/unban`（含 `<id>`）可用性与防呆（受保护账号不可封禁）
+> - 用户资料展示：新增 `resolveUserProfileStatus`（基于 `getChat` 的名称与账号状态解析，含短 TTL 缓存），并接入 `admin-reply` 与 `cleanup` 输出
+> - 关键词与管理细节：新增按 ID 删除关键词、补充表达式限制与测试能力，优化 `/kw list` 分片输出与管理交互反馈
 > 
 > （2026.02.04）：
 > - 引入 D1+KV 混合存储，核心数据迁移至 D1
@@ -219,11 +227,11 @@ sed -i "s|REPLACE_WITH_D1_DATABASE_ID|${CF_D1_DATABASE_ID}|g" wrangler.toml && s
 > 获取后回到此处填入构建环境变量，然后触发一次重新部署即可生效。
 
 ![](./20260221013322.webp)
-
+***
 ![](./20260221013535.webp)
-
+***
 ![](./20260221013647.webp)
-
+***
 ![](./20260221014019.webp)
 
 ### 步骤 07：创建 D1 数据库
