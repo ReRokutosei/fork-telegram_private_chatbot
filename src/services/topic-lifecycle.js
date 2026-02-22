@@ -64,12 +64,10 @@ export async function resetUserVerificationAndRequireReverifyImpl({
     await env.TOPIC_MAP.put(`needs_verify:${userId}`, '1', { expirationTtl: CONFIG.NEEDS_REVERIFY_TTL_SECONDS });
     await env.TOPIC_MAP.delete(`retry:${userId}`);
 
-    if (userKey) {
-        if (hasD1(env)) {
-            await dbUserUpdate(env, userId, { thread_id: null, title: null, closed: false });
-        } else {
-            await env.TOPIC_MAP.delete(userKey);
-        }
+    if (hasD1(env)) {
+        await dbUserUpdate(env, userId, { thread_id: null, title: null, closed: false });
+    } else if (userKey) {
+        await env.TOPIC_MAP.delete(userKey);
     }
 
     if (oldThreadId !== undefined && oldThreadId !== null) {

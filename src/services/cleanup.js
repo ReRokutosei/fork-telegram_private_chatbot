@@ -34,6 +34,8 @@ export async function handleCleanupCommandImpl({
 
     let cleanedCount = 0;
     let errorCount = 0;
+    let firstTimeCount = 0;
+    let repeatCount = 0;
     const cleanedUsers = [];
     let scannedCount = 0;
 
@@ -58,6 +60,9 @@ export async function handleCleanupCommandImpl({
                         });
 
                         if (probe.status === 'redirected' || probe.status === 'missing') {
+                            const cleanupType = (await env.TOPIC_MAP.get(`needs_verify:${userId}`))
+                                ? 'repeat'
+                                : 'first_time';
                             await resetUserVerificationAndRequireReverify(env, {
                                 userId,
                                 userKey: null,
@@ -69,7 +74,8 @@ export async function handleCleanupCommandImpl({
                             return {
                                 userId,
                                 threadId: topicThreadId,
-                                title: row.title || '未知'
+                                title: row.title || '未知',
+                                cleanupType
                             };
                         } else if (probe.status === 'probe_invalid') {
                             Logger.warn('cleanup_probe_invalid_message', {
@@ -94,10 +100,16 @@ export async function handleCleanupCommandImpl({
                 results.forEach(result => {
                     if (result.status === 'fulfilled' && result.value) {
                         cleanedCount++;
+                        if (result.value.cleanupType === 'repeat') {
+                            repeatCount++;
+                        } else {
+                            firstTimeCount++;
+                        }
                         cleanedUsers.push(result.value);
                         Logger.info('cleanup_user', {
                             userId: result.value.userId,
-                            threadId: result.value.threadId
+                            threadId: result.value.threadId,
+                            cleanupType: result.value.cleanupType
                         });
                     } else if (result.status === 'rejected') {
                         errorCount++;
@@ -134,6 +146,9 @@ export async function handleCleanupCommandImpl({
                             });
 
                             if (probe.status === 'redirected' || probe.status === 'missing') {
+                                const cleanupType = (await env.TOPIC_MAP.get(`needs_verify:${userId}`))
+                                    ? 'repeat'
+                                    : 'first_time';
                                 keysToDelete.push(
                                     name,
                                     `verified:${userId}`,
@@ -143,7 +158,8 @@ export async function handleCleanupCommandImpl({
                                 return {
                                     userId,
                                     threadId: topicThreadId,
-                                    title: rec.title || '未知'
+                                    title: rec.title || '未知',
+                                    cleanupType
                                 };
                             } else if (probe.status === 'probe_invalid') {
                                 Logger.warn('cleanup_probe_invalid_message', {
@@ -168,10 +184,16 @@ export async function handleCleanupCommandImpl({
                     results.forEach(result => {
                         if (result.status === 'fulfilled' && result.value) {
                             cleanedCount++;
+                            if (result.value.cleanupType === 'repeat') {
+                                repeatCount++;
+                            } else {
+                                firstTimeCount++;
+                            }
                             cleanedUsers.push(result.value);
                             Logger.info('cleanup_user', {
                                 userId: result.value.userId,
-                                threadId: result.value.threadId
+                                threadId: result.value.threadId,
+                                cleanupType: result.value.cleanupType
                             });
                         } else if (result.status === 'rejected') {
                             errorCount++;
@@ -201,6 +223,8 @@ export async function handleCleanupCommandImpl({
         reportText += `📊 统计信息\n`;
         reportText += `- 扫描用户数: ${scannedCount}\n`;
         reportText += `- 已清理用户数: ${cleanedCount}\n`;
+        reportText += `  - 首次清理: ${firstTimeCount}\n`;
+        reportText += `  - 重复清理: ${repeatCount}\n`;
         reportText += `- 错误数: ${errorCount}\n\n`;
 
         if (cleanedCount > 0) {
@@ -228,6 +252,8 @@ export async function handleCleanupCommandImpl({
 
         Logger.info('cleanup_completed', {
             cleanedCount,
+            firstTimeCount,
+            repeatCount,
             errorCount,
             totalUsers: scannedCount
         });
