@@ -9,6 +9,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     // 群组命令可能为 /cmd@BotName，统一归一化到 /cmd
     const baseCmd = rawCmd.split("@")[0].toLowerCase();
     const args = parts.slice(1);
+    const kwAction = (args[0] || "").toLowerCase();
     const sendInThread = async (text, parseMode = null) => {
         const payload = { chat_id: env.SUPERGROUP_ID, text };
         if (threadId) payload.message_thread_id = threadId;
@@ -87,14 +88,41 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
             "/trust - 设为永久信任",
             "/reset - 重置验证状态",
             "/cleanup - 清理已删除话题数据",
-            "/kw help - 关键词管理帮助"
+            "/kwhelp - 关键词管理帮助"
         ].join("\n");
         await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: helpText, parse_mode: "Markdown" });
         return;
     }
 
     // 允许任意话题执行的管理指令
-    if (baseCmd === "/kw" && (args[0] || "").toLowerCase() === "list") {
+    if (baseCmd === "/kwhelp" || (baseCmd === "/kw" && kwAction === "help")) {
+        if (!hasD1(env)) {
+            await sendInThread("⚠️ 关键词功能需要绑定 D1 数据库。", "Markdown");
+            return;
+        }
+        const helpText = [
+            "🔎 **关键词管理**",
+            "",
+            "/kw add 关键词 - 添加关键词",
+            "/kw del 关键词 - 删除关键词",
+            "/kw del id <id> - 按 ID 删除关键词",
+            "/kw list - 查看关键词列表",
+            "/kwhelp - 查看关键词帮助",
+            "/kw test <表达式> <文本> - 测试正则是否命中",
+            "",
+            "规则限制：",
+            `1) 关键词长度上限 ${CONFIG.KEYWORD_MAX_LENGTH} 字符`,
+            `2) 过滤仅匹配前 ${CONFIG.KEYWORD_MATCH_MAX_TEXT_LENGTH} 字符`,
+            "3) 正则限制：",
+            "- `.*` / `.+` 出现超过 2 次会被拒绝",
+            "- 嵌套量词会被拒绝（如 `(a+)+`、`(.+)+`、`(.+)*`、`(.*)+`）",
+            "- 形如 `(.*){2,}`、`(.+){1,}` 的重复结构会被拒绝"
+        ].join("\n");
+        await sendInThread(helpText, "Markdown");
+        return;
+    }
+
+    if (baseCmd === "/kw" && kwAction === "list") {
         if (!hasD1(env)) {
             const warnText = "⚠️ 关键词功能需要绑定 D1 数据库。";
             await sendInThread(warnText, "Markdown");
@@ -126,7 +154,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
 
     const userId = await resolveTargetUserId();
     const needsUserContext = new Set(["/ban", "/unban", "/info", "/close", "/open", "/reset", "/trust"]);
-    const isKwThreadOnly = baseCmd === "/kw" && (args[0] || "").toLowerCase() !== "list";
+    const isKwThreadOnly = baseCmd === "/kw" && !["list", "help"].includes(kwAction);
     if (!userId && (needsUserContext.has(baseCmd) || isKwThreadOnly)) {
         await sendTargetUserRequiredFeedback();
         return;
@@ -240,6 +268,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
                 "/kw del 关键词 - 删除关键词",
                 "/kw del id <id> - 按 ID 删除关键词",
                 "/kw list - 查看关键词列表",
+                "/kwhelp - 查看关键词帮助",
                 "/kw test <表达式> <文本> - 测试正则是否命中",
                 "",
                 "规则限制：",
@@ -254,7 +283,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
             return;
         }
 
-        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词` / `/kw del 关键词` / `/kw del id <id>` / `/kw list` / `/kw test <表达式> <文本>` / `/kw help`", parse_mode: "Markdown" });
+        await tgCall(env, "sendMessage", { chat_id: env.SUPERGROUP_ID, message_thread_id: threadId, text: "用法：`/kw add 关键词` / `/kw del 关键词` / `/kw del id <id>` / `/kw list` / `/kwhelp` / `/kw test <表达式> <文本>`", parse_mode: "Markdown" });
         return;
     }
 
