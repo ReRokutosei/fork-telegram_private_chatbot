@@ -319,6 +319,13 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         const profile = resolveUserProfileStatus
             ? await resolveUserProfileStatus(env, userId)
             : { displayName: `用户${userId}`, statusLabel: '未知' };
+        const ownerId = Number(env.BOT_OWNER_ID || 0);
+        const isProtectedUser = (ownerId && Number(userId) === ownerId) || await isAdminUser(env, userId);
+        if (isProtectedUser) {
+            await sendInThread(`❌ 不能封禁受保护账号\nUID: ${userId}\n名字: ${profile.displayName}`);
+            return;
+        }
+
         const alreadyBanned = hasD1(env)
             ? await dbIsBanned(env, userId)
             : !!(await env.TOPIC_MAP.get(`banned:${userId}`));
