@@ -316,6 +316,14 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     }
 
     if (baseCmd === "/ban") {
+        const alreadyBanned = hasD1(env)
+            ? await dbIsBanned(env, userId)
+            : !!(await env.TOPIC_MAP.get(`banned:${userId}`));
+        if (alreadyBanned) {
+            await sendInThread(`⚠️ 用户已在黑名单中\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
+            return;
+        }
+
         if (hasD1(env)) {
             await dbSetBanned(env, userId, true);
         } else {
@@ -326,6 +334,14 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     }
 
     if (baseCmd === "/unban") {
+        const alreadyBanned = hasD1(env)
+            ? await dbIsBanned(env, userId)
+            : !!(await env.TOPIC_MAP.get(`banned:${userId}`));
+        if (!alreadyBanned) {
+            await sendInThread(`⚠️ 用户当前不在黑名单中\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
+            return;
+        }
+
         if (hasD1(env)) {
             await dbSetBanned(env, userId, false);
         } else {
