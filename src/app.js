@@ -13,7 +13,7 @@ import { tgCall } from './adapters/telegram.js';
 import { checkRateLimit } from './services/rate-limit.js';
 import { getFilterText, validateKeywordPattern, matchKeyword } from './services/keywords.js';
 import { isAdminUser } from './services/admin.js';
-import { withMessageThreadId, normalizeTgDescription, isTopicMissingOrDeleted, sendWelcomeCard, probeForumThread } from './services/topic-utils.js';
+import { withMessageThreadId, normalizeTgDescription, isTopicMissingOrDeleted, sendWelcomeCard, probeForumThread, resolveUserProfileStatus } from './services/topic-utils.js';
 import { sendVerificationChallengeImpl, handleCallbackQueryImpl } from './services/verification.js';
 import { handleMediaGroupImpl, flushExpiredMediaGroupsImpl, delaySendImpl } from './services/media-group.js';
 import { handleCleanupCommandImpl } from './services/cleanup.js';
@@ -256,7 +256,8 @@ async function handleAdminReply(msg, env, ctx) {
         dbIsBanned,
         handleMediaGroup,
         dbMessageMapPut,
-        handleCleanupCommand
+        handleCleanupCommand,
+        resolveUserProfileStatus
     });
 }
 
@@ -322,7 +323,8 @@ async function handleCleanupCommand(threadId, env) {
         safeGetJSON,
         deleteBulk,
         tgCall,
-        withMessageThreadId
+        withMessageThreadId,
+        resolveUserProfileStatus
     });
 }
 

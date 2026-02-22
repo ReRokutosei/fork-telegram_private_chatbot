@@ -10,7 +10,8 @@ export async function handleCleanupCommandImpl({
     safeGetJSON,
     deleteBulk,
     tgCall,
-    withMessageThreadId
+    withMessageThreadId,
+    resolveUserProfileStatus
 }) {
     const lockKey = 'cleanup:lock';
     const locked = await env.TOPIC_MAP.get(lockKey);
@@ -204,8 +205,17 @@ export async function handleCleanupCommandImpl({
 
         if (cleanedCount > 0) {
             reportText += `🗑️ 已清理的用户 (话题已删除):\n`;
-            for (const user of cleanedUsers.slice(0, CONFIG.MAX_CLEANUP_DISPLAY)) {
-                reportText += `- UID: ${user.userId} | 话题: ${user.title}\n`;
+            const shownUsers = cleanedUsers.slice(0, CONFIG.MAX_CLEANUP_DISPLAY);
+            const profiles = await Promise.all(shownUsers.map(async (user) => {
+                if (!resolveUserProfileStatus) return { displayName: `用户${user.userId}`, statusLabel: '未知' };
+                return await resolveUserProfileStatus(env, user.userId, { name: user.title });
+            }));
+
+            for (let i = 0; i < shownUsers.length; i++) {
+                const user = shownUsers[i];
+                const profile = profiles[i];
+                reportText += `· UID: ${user.userId} | 名字: ${profile.displayName}\n`;
+                reportText += `  账号状态: ${profile.statusLabel} | 话题: ${user.title}\n`;
                 reportText += `  Link: (tg://user?id=${user.userId})\n`;
             }
             if (cleanedUsers.length > CONFIG.MAX_CLEANUP_DISPLAY) {

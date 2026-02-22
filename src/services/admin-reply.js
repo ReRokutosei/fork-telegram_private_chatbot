@@ -1,5 +1,5 @@
 export async function handleAdminReplyImpl(msg, env, ctx, deps) {
-    const { isAdminUser, hasD1, dbKeywordListWithId, tgCall, dbSetBanned, dbThreadGetUserId, dbThreadPut, getAllKeys, safeGetJSON, dbKeywordAdd, dbKeywordDelete, dbKeywordDeleteById, validateKeywordPattern, CONFIG, dbUserUpdate, dbSetVerifyState, dbUserGet, dbGetVerifyState, dbIsBanned, handleMediaGroup, dbMessageMapPut, handleCleanupCommand } = deps;
+    const { isAdminUser, hasD1, dbKeywordListWithId, tgCall, dbSetBanned, dbThreadGetUserId, dbThreadPut, getAllKeys, safeGetJSON, dbKeywordAdd, dbKeywordDelete, dbKeywordDeleteById, validateKeywordPattern, CONFIG, dbUserUpdate, dbSetVerifyState, dbUserGet, dbGetVerifyState, dbIsBanned, handleMediaGroup, dbMessageMapPut, handleCleanupCommand, resolveUserProfileStatus } = deps;
 
     const threadId = msg.message_thread_id;
     const text = (msg.text || "").trim();
@@ -316,11 +316,14 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
     }
 
     if (baseCmd === "/ban") {
+        const profile = resolveUserProfileStatus
+            ? await resolveUserProfileStatus(env, userId)
+            : { displayName: `用户${userId}`, statusLabel: '未知' };
         const alreadyBanned = hasD1(env)
             ? await dbIsBanned(env, userId)
             : !!(await env.TOPIC_MAP.get(`banned:${userId}`));
         if (alreadyBanned) {
-            await sendInThread(`⚠️ 用户已在黑名单中\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
+            await sendInThread(`⚠️ 用户已在黑名单中\nUID: ${userId}\n名字: ${profile.displayName}\n账号状态: ${profile.statusLabel}\nLink: (tg://user?id=${userId})`);
             return;
         }
 
@@ -329,16 +332,19 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.put(`banned:${userId}`, "1");
         }
-        await sendInThread(`🚫 用户已封禁\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
+        await sendInThread(`🚫 用户已封禁\nUID: ${userId}\n名字: ${profile.displayName}\n账号状态: ${profile.statusLabel}\nLink: (tg://user?id=${userId})`);
         return;
     }
 
     if (baseCmd === "/unban") {
+        const profile = resolveUserProfileStatus
+            ? await resolveUserProfileStatus(env, userId)
+            : { displayName: `用户${userId}`, statusLabel: '未知' };
         const alreadyBanned = hasD1(env)
             ? await dbIsBanned(env, userId)
             : !!(await env.TOPIC_MAP.get(`banned:${userId}`));
         if (!alreadyBanned) {
-            await sendInThread(`⚠️ 用户当前不在黑名单中\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
+            await sendInThread(`⚠️ 用户当前不在黑名单中\nUID: ${userId}\n名字: ${profile.displayName}\n账号状态: ${profile.statusLabel}\nLink: (tg://user?id=${userId})`);
             return;
         }
 
@@ -347,7 +353,7 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
         } else {
             await env.TOPIC_MAP.delete(`banned:${userId}`);
         }
-        await sendInThread(`✅ 用户已解封\nUID: ${userId}\nLink: (tg://user?id=${userId})`);
+        await sendInThread(`✅ 用户已解封\nUID: ${userId}\n名字: ${profile.displayName}\n账号状态: ${profile.statusLabel}\nLink: (tg://user?id=${userId})`);
         return;
     }
 
@@ -364,9 +370,12 @@ export async function handleAdminReplyImpl(msg, env, ctx, deps) {
 
         const topicId = userRec?.thread_id || threadId || "未知";
         const title = userRec?.title || "未知";
+        const profile = resolveUserProfileStatus
+            ? await resolveUserProfileStatus(env, userId, { name: title })
+            : { displayName: title, statusLabel: '未知' };
         const verifyLabel = verifyStatus ? (verifyStatus === 'trusted' ? '🌟 永久信任' : '✅ 已验证') : '❌ 未验证';
         const banLabel = banStatus ? '🚫 已封禁' : '✅ 正常';
-        const info = `👤 用户信息\nUID: ${userId}\nLink: (tg://user?id=${userId})\nTopic ID: ${topicId}\n话题标题: ${title}\n验证状态: ${verifyLabel}\n封禁状态: ${banLabel}`;
+        const info = `👤 用户信息\nUID: ${userId}\n名字: ${profile.displayName}\n账号状态: ${profile.statusLabel}\nLink: (tg://user?id=${userId})\nTopic ID: ${topicId}\n话题标题: ${title}\n验证状态: ${verifyLabel}\n封禁状态: ${banLabel}`;
         await sendInThread(info);
         return;
     }
