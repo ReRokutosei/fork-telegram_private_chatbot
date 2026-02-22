@@ -425,7 +425,27 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 | `/kw del id <id>` | 按 ID 删除关键词过滤          |
 | `/kw list` | 查看关键词列表（任意话题可用）  |
 | `/kw test` | 测试正则表达式                  |
-| `/kw help` | 查看关键词管理帮助                |
+| `/kwhelp` | 查看关键词管理帮助                |
+
+> [!TIP]
+> 如果希望在群组输入框内，输入 `/` 有可视命令列表时
+>
+> 1. 前往 `@BotFather` 处
+> 2. 输入 `/setcommands`，选择你的机器人
+> 3. 复制粘贴以下文本即可(也可以自定义 `-` 后面的中文说明)
+> - 注：BotFather 只接受连续字符作为命令提示，像`/kw list`这种有空格的无法写入提示列表
+
+```text
+info - 显示当前用户信息
+close - 关闭对话
+open - 重新开启对话
+ban - 封禁用户
+unban - 解封用户
+trust - 设为永久信任
+reset - 重置验证状态
+cleanup - 清理已删除话题数据
+kwhelp - 查看关键词管理帮助
+```
 
 ### 关键词过滤用法
 
@@ -475,7 +495,7 @@ https://api.telegram.org/bot1234:HUSH2GW/setWebhook?url=https://1234.workers.dev
 `/kw del id 23`
 
 6. 查看帮助  
-`/kw help`
+`/kwhelp`
 
 ---
 
